@@ -453,6 +453,26 @@ await check('简介风格：存一个自己的，切换时只重排不调 API；
     assert.ok(draft().intro.text.includes('## 关于TA'));
 });
 
+await check('开场白一写完就改掉必改词；八股检查显示文中真正的词', async () => {
+    const S = ctx.extensionSettings.cardWorkshop;
+    if (withBagu) {
+        S.greetMustClean = false;
+        await go('greet');
+        await click('[data-act="greet"]');
+        const route = draft().routes[0].name;
+        assert.ok(draft().greetings.filter((g) => g.route === route).some((g) => g.text.includes('的弧度')), '关掉时不改');
+        const bar = cw().find('.cw-bagubar').text();
+        assert.ok(bar.includes('嘴角勾起一抹若有若无的弧度') || bar.includes('的弧度'), bar);
+        assert.ok(!bar.includes('(?:'), '不显示规则写法');
+        S.greetMustClean = true;
+        const n = prompts.length;
+        await click('[data-act="greet"]');
+        assert.ok(!draft().greetings.filter((g) => g.route === route).some((g) => g.text.includes('的弧度')), '写完立刻改掉');
+        assert.ok(cw().find('.cw-status').text().includes('顺手改掉了'));
+        assert.equal(prompts.length - n, 2, '写开场白 1 次 + 改必改词 1 次');
+    }
+});
+
 await check('八股清理不碰基调与规则', async () => {
     await go('check');
     draft().tone = '<创作文体>\n调性: 嘴角勾起一抹若有若无的弧度也不行\n</创作文体>';

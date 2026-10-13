@@ -8,10 +8,10 @@ import { emptyDraft, buildEntries, toWorldData, buildCharacter, uniqueName, orde
 import { makeTokenCounter, fmtTokens } from './src/tokens.js';
 import { makeFlow } from './src/flow.js';
 import { callLLM, listProfiles, listPresets } from './src/llm.js';
-import { loadBagu, hasBagu, baguOptions, baguScan, baguRewrite, isInstructions } from './src/bagu.js';
+import { loadBagu, hasBagu, baguOptions, baguScan, baguRewrite, baguRewriteMany, wordsText, isInstructions } from './src/bagu.js';
 
 const MODULE = 'cardWorkshop';
-const VERSION = '0.10.0';
+const VERSION = '0.11.0';
 const getCtx = () => SillyTavern.getContext();
 
 const DEFAULTS = {
@@ -37,6 +37,7 @@ const DEFAULTS = {
     predictThreshold: 0.42,
     autoPredict: true,
     autoBagu: true,
+    greetMustClean: true,
     blueBudget: 4000,
     playLength: 300,
     prompts: {},
@@ -444,7 +445,7 @@ function scanPage(id) {
     return pageSlots(id).map((s) => {
         const words = findWords(s.get(), banned);
         const r = opts ? baguScan(s.get(), opts) : null;
-        return { s, words, total: r?.total ?? 0, must: r?.must ?? 0, top: r?.top ?? [] };
+        return { s, words, total: r?.total ?? 0, must: r?.must ?? 0, found: r?.words ?? [] };
     });
 }
 function pageBaguHtml(id) {
@@ -458,7 +459,7 @@ function pageBaguHtml(id) {
     const head = hit.length
         ? `八股检查：${[words ? `禁用词 <b class="cw-err">${words}</b> 个` : '', total ? `八股 <b>${total}</b> 处` : ''].filter(Boolean).join(' · ')}，在 ${hit.length} 块里`
         : `八股检查：<span class="cw-ok">这一页${hasBagu() ? '没有禁用词和八股' : '没有禁用词'}</span>`;
-    const list = hit.map((x) => `<div class="cw-ov"><b>${esc(x.s.label)}</b>　${x.words.length ? `禁用词：<span class="cw-err">${esc(x.words.join('、'))}</span>　` : ''}${x.total ? `八股 ${x.total} 处${x.must ? `（必改 ${x.must}）` : ''}：<span class="cw-dim">${esc(x.top.slice(0, 6).map((h) => h.label).join('、'))}</span>` : ''}</div>`).join('');
+    const list = hit.map((x) => `<div class="cw-ov"><b>${esc(x.s.label)}</b>　${x.words.length ? `禁用词：<span class="cw-err">${esc(x.words.join('、'))}</span>　` : ''}${x.total ? `八股 ${x.total} 处${x.must ? `（必改 ${x.must}）` : ''}：<span class="cw-dim">${esc(wordsText(x.found, 8, x.words))}</span>` : ''}</div>`).join('');
     const canFix = hasBagu() && hit.some((x) => x.total && !x.s.scanOnly);
     return `<div class="cw-bagubar ${hit.length ? 'hit' : ''}">
 <div class="cw-row"><span class="cw-grow cw-small">${head}</span>${canFix ? btn('baguPage', `清理这一页（${hit.filter((x) => x.total && !x.s.scanOnly).length} 块）`, `data-page="${esc(id)}"`) : ''}</div>
@@ -475,7 +476,7 @@ function clicheHtml(text, i) {
     const opts = hasBagu() ? baguOptions(getCtx().extensionSettings, flow.banned(draft())) : null;
     const scan = opts ? baguScan(text, opts) : null;
     if (!words.length && !scan?.total) return '<div class="cw-small"><span class="cw-badge ok">没有禁用词和八股</span></div>';
-    return `<div class="cw-box cw-small">${words.length ? `<div>禁用词：<b class="cw-err">${esc(words.join('、'))}</b></div>` : ''}${scan?.total ? `<div>八股 ${scan.total} 处：${esc(scan.top.slice(0, 6).map((h) => h.label).join('、'))}</div>` : ''}
+    return `<div class="cw-box cw-small">${words.length ? `<div>禁用词：<b class="cw-err">${esc(words.join('、'))}</b></div>` : ''}${scan?.total ? `<div>八股 ${scan.total} 处：${esc(wordsText(scan.words, 8, words))}</div>` : ''}
 ${hasBagu() ? `<div class="cw-row">${btn('baguOne', '只清理这个人设', `data-i="${i}"`)}</div>` : ''}</div>`;
 }
 
@@ -846,7 +847,7 @@ async function autoRun() {
             if (!d.tone) { await flow.tone(d); tick(); }
             await mine('tone');
             for (let i = 0; i < d.routes.length; i++) {
-                if (!d.greetings.some((g) => g.route === d.routes[i].name)) { setStatus(`开场白：${esc(d.routes[i].name)}…`); await flow.greetings(d, i); tick(); }
+                if (!d.greetings.some((g) => g.route === d.routes[i].name)) { setStatus(`开场白：${esc(d.routes[i].name)}…`); await greetClean(() => flow.greetings(d, i)); tick(); }
             }
             await mine('greet');
             if (s.autoBagu && hasBagu()) { await baguFix(); tick(); }
@@ -859,7 +860,7 @@ async function autoRun() {
             if (d.routes.some((r) => !r.info)) { await flow.routes(d); tick(); }
             for (let i = 0; i < d.routes.length; i++) {
                 const r = d.routes[i];
-                if (!r.orig && !d.greetings.some((g) => g.route === r.name)) { setStatus(`开场白：${esc(r.name)}…`); await flow.greetings(d, i); tick(); }
+                if (!r.orig && !d.greetings.some((g) => g.route === r.name)) { setStatus(`开场白：${esc(r.name)}…`); await greetClean(() => flow.greetings(d, i)); tick(); }
             }
             if (s.autoBagu && hasBagu()) { await baguFix(); tick(); }
             state.checks = flow.localCheck(d);
@@ -883,7 +884,7 @@ async function autoRun() {
         if (!d.tone) { await flow.tone(d); tick(); }
         await mine('tone');
         for (let i = 0; i < d.routes.length; i++) {
-            if (!d.greetings.some((g) => g.route === d.routes[i].name)) { setStatus(`开场白：${esc(d.routes[i].name)}…`); await flow.greetings(d, i); tick(); }
+            if (!d.greetings.some((g) => g.route === d.routes[i].name)) { setStatus(`开场白：${esc(d.routes[i].name)}…`); await greetClean(() => flow.greetings(d, i)); tick(); }
         }
         await mine('greet');
         if (s.autoPredict) {
@@ -900,23 +901,49 @@ async function autoRun() {
     }, '一键出卡完成。看一下质检结果，没问题就导入。');
 }
 
-async function baguFix() {
-    const ext = getCtx().extensionSettings;
-    const opts = baguOptions(ext, flow.banned(draft()));
+/** 好几块一起清理：句子合在一起分批发，结果写回各块 */
+async function baguMany(slots, { onlyMust = false, label = '八股清理' } = {}) {
+    const opts = baguOptions(getCtx().extensionSettings, flow.banned(draft()));
+    const res = await baguRewriteMany(slots.map((x) => ({ text: x.get(), kind: x.kind })), opts,
+        (system, user) => llm({ system, user, stage: 'card' }),
+        () => state.abort,
+        {
+            onlyMust,
+            onProgress: ({ sent, rounds, retry, sentences }) => setStatus(retry
+                ? `${label}：没改好的句子再来一轮…`
+                : `${label}：${slots.length} 块共 ${sentences} 句，第 ${sent}/${rounds} 批…`),
+        });
     const report = [];
-    for (const slot of flow.textSlots(draft())) {
-        if (state.abort) break;
-        if (slot.rules || isInstructions(slot.get())) continue; // 规则清单本来就列着禁用词，改不了也不该改
-        const scan = baguScan(slot.get(), opts);
-        if (!scan.total) continue;
-        setStatus(`八股清理：${esc(slot.label)}…`);
-        const r = await baguRewrite(slot.get(), slot.kind, opts,
-            (system, user) => llm({ system, user, stage: 'card' }),
-            () => state.abort);
-        slot.set(r.text);
-        report.push({ label: slot.label, text: `改了 ${r.changed} 句${r.failed.length ? `，${r.failed.length} 句没改好：${esc(r.failed.join('、'))}` : ''}` });
-    }
+    let changed = 0;
+    res.forEach((r, i) => {
+        if (r.changed) { slots[i].set(r.text); changed += r.changed; }
+        report.push({ label: slots[i].label, text: `改了 ${r.changed} 句${r.failed.length ? `，<span class="cw-warntext">${r.failed.length} 句没改好：${esc(r.failed.join('、'))}</span>` : ''}` });
+    });
+    return { report, changed };
+}
+
+async function baguFix() {
+    const opts = baguOptions(getCtx().extensionSettings, flow.banned(draft()));
+    // 规则清单本来就列着禁用词，改不了也不该改
+    const slots = flow.textSlots(draft()).filter((x) => !x.rules && !isInstructions(x.get()) && baguScan(x.get(), opts).total);
+    const { report } = slots.length ? await baguMany(slots) : { report: [] };
     state.bagu = report.length ? report : [{ label: '八股清理', text: '没有需要改的句子' }];
+}
+
+const greetCleanNote = () => (state.greetCleaned ? `顺手改掉了 ${state.greetCleaned} 句带必改词的。` : '');
+
+/** 开场白一写完就只改必改词（禁用词、我的八股词）那几句 */
+async function greetClean(fn) {
+    const d = draft();
+    const before = new Set(d.greetings ?? []);
+    const out = await fn();
+    if (!settings().greetMustClean || !hasBagu() || state.abort) return out;
+    const opts = baguOptions(getCtx().extensionSettings, flow.banned(d));
+    const fresh = (d.greetings ?? []).filter((g) => !before.has(g) && baguScan(g.text, opts).must);
+    if (!fresh.length) return out;
+    const { changed } = await baguMany(fresh.map((g, i) => ({ label: `新开场白 ${i + 1}`, kind: '开场白', get: () => g.text, set: (v) => { g.text = v; } })), { onlyMust: true, label: '开场白必改词' });
+    state.greetCleaned = changed;
+    return out;
 }
 
 /** 一页里各块的“换回上一版”用的键 */
@@ -942,20 +969,13 @@ function pageHistoryKeys(d, id) {
 /** 只清理一页：有八股的块逐个送去改写，旧版本存进“换回上一版” */
 async function baguPage(id) {
     const d = draft();
-    const opts = baguOptions(getCtx().extensionSettings, flow.banned(d));
-    const report = [];
+    let report = [];
     let changed = 0;
     // 先存一份，清理完不满意可以在各块的“换回上一版”找回
     const keys = pageHistoryKeys(d, id);
     const snap = keys.map((k) => [k, structuredClone(flow.slotOf(d, k)?.get())]);
-    for (const x of scanPage(id)) {
-        if (state.abort) break;
-        if (!x.total || x.s.scanOnly) continue;
-        setStatus(`八股清理：${esc(x.s.label)}…`);
-        const r = await baguRewrite(x.s.get(), x.s.kind, opts, (system, user) => llm({ system, user, stage: 'card' }), () => state.abort);
-        if (r.changed) { x.s.set(r.text); changed += r.changed; }
-        report.push({ label: x.s.label, text: `改了 ${r.changed} 句${r.failed.length ? `，<span class="cw-warntext">${r.failed.length} 句没改好：${esc(r.failed.join('、'))}</span>` : ''}` });
-    }
+    const slots = scanPage(id).filter((x) => x.total && !x.s.scanOnly).map((x) => x.s);
+    if (slots.length) ({ report, changed } = await baguMany(slots));
     if (id === 'intro' && d.intro?.parts && Object.keys(d.intro.parts).length) d.intro.text = flow.composeIntroFor(d);
     for (const [k, v] of snap) {
         if (JSON.stringify(v) !== JSON.stringify(flow.slotOf(d, k)?.get())) flow.remember(d, k, v);
@@ -1199,7 +1219,7 @@ const ACTIONS = {
         return step(() => flow.ideaQA(draft()), '点选或自己写，然后“带上回答生成构想”。');
     },
     hooks: (el) => step(() => flow.hooks(draft(), ensureRoute(Number(el.dataset.i))), '勾选喜欢的梗，可以改字，再点“扩写”。'),
-    expand: (el) => step(async () => `扩写了 ${await flow.expand(draft(), ensureRoute(Number(el.dataset.i)))} 个开场白，加在这条路线后面。`),
+    expand: (el) => step(async () => { state.greetCleaned = 0; const n = await greetClean(() => flow.expand(draft(), ensureRoute(Number(el.dataset.i)))); return `扩写了 ${n} 个开场白，加在这条路线后面。${greetCleanNote()}`; }),
     addHook: (el) => {
         const i = ensureRoute(Number(el.dataset.i));
         const r = draft().routes[i];
@@ -1314,14 +1334,14 @@ const ACTIONS = {
     tone: () => step(() => flow.tone(draft()), '基调与规则写好了。'),
     free: (el) => step(() => flow.free(draft(), Number(el.dataset.i)), '模块写好了。'),
     custom: (el) => { const st = settings().customSteps[Number(el.dataset.i)]; return step(() => flow.custom(draft(), st), `${esc(st.name)} 完成，产出在自由模块里。`); },
-    greet: (el) => step(() => flow.greetings(draft(), Number(el.dataset.i)), '开场白写好了。'),
+    greet: (el) => step(async () => { state.greetCleaned = 0; await greetClean(() => flow.greetings(draft(), Number(el.dataset.i))); return `开场白写好了。${greetCleanNote()}`; }),
     add: (el) => { getPath(draft(), el.dataset.path).push(TEMPLATES[el.dataset.tpl]()); saveDraft(); renderAll(); },
     del: (el) => { getPath(draft(), el.dataset.path).splice(Number(el.dataset.i), 1); saveDraft(); renderAll(); },
     localCheck: () => { state.checks = flow.localCheck(draft()); renderAll(); },
     baguScan: () => {
         const opts = baguOptions(getCtx().extensionSettings, flow.banned(draft()));
         state.bagu = flow.textSlots(draft()).filter((s) => !s.rules && !isInstructions(s.get())).map((s) => ({ s, r: baguScan(s.get(), opts) })).filter((x) => x.r.total)
-            .map((x) => ({ label: x.s.label, text: `${x.r.must ? `<b class="cw-err">必改 ${x.r.must}</b> · ` : ''}八股 ${x.r.total} 处：${x.r.top.slice(0, 6).map((h) => esc(h.label)).join('、')}` }));
+            .map((x) => ({ label: x.s.label, text: `${x.r.must ? `<b class="cw-err">必改 ${x.r.must}</b> · ` : ''}八股 ${x.r.total} 处：${esc(wordsText(x.r.words, 10))}` }));
         if (!state.bagu.length) state.bagu = [{ label: '八股清理', text: '没扫到八股' }];
         renderAll();
     },
@@ -1529,6 +1549,7 @@ function settingsPageHtml() {
 <label>经历写几段<input class="text_pole cw-num" data-set="backstoryCount" value="${esc(s.backstoryCount)}"></label>
 <label class="checkbox_label"><input type="checkbox" data-set="autoPredict" ${s.autoPredict ? 'checked' : ''}>一键出卡时做可预测性测试，撞车就自动重写（每个角色多 2–3 次调用）</label>
 <label class="checkbox_label"><input type="checkbox" data-set="autoBagu" ${s.autoBagu ? 'checked' : ''}>一键出卡时用八股清理改写</label>
+<label class="checkbox_label"><input type="checkbox" data-set="greetMustClean" ${s.greetMustClean ? 'checked' : ''}>开场白一写完，带禁用词和“我的八股词”的句子立刻改掉（只改这几句，所有新开场白合在一起，通常 1–2 次调用）</label>
 <label>常驻设定 token 上限<input class="text_pole cw-num" type="number" min="0" step="500" data-set="blueBudget" data-num value="${s.blueBudget}"></label>
 <div class="cw-dim cw-small">蓝灯条目 + 当前路线 + 角色描述加起来超过这个数，目录和导入页会标出来。0 = 不提示。用酒馆当前 API 的分词器算，算不了时按字数估。</div>
 

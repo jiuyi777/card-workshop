@@ -37,63 +37,122 @@ export function baguOptions(extensionSettings, extraWords = []) {
     return { rules, errors, protectQuotes: s.protectQuotes ?? true, aiPrompt: s.aiPrompt };
 }
 
+/**
+ * 扫描。words 是文中真正命中的片段（不是规则的写法），必改的排前面。
+ * @returns {{total:number, must:number, top:any[], words:{text:string,must:boolean,count:number}[]}}
+ */
 export function baguScan(text, opts) {
-    if (!engine || !opts) return { total: 0, must: 0, top: [] };
-    return engine.scanText(text, opts);
+    if (!engine || !opts) return { total: 0, must: 0, top: [], words: [] };
+    const r = engine.scanText(text, opts);
+    const map = new Map();
+    let hits = [];
+    try { hits = engine.hitList ? engine.hitList(text, opts) : []; } catch { hits = []; }
+    for (const h of hits) {
+        const t = String(h.match ?? '').trim();
+        if (!t) continue;
+        const v = map.get(t) ?? { text: t, must: false, count: 0 };
+        v.count++;
+        v.must ||= h.type === 'must';
+        map.set(t, v);
+    }
+    // 规则有重叠时（“骨节分明”和“骨节分明的”）只留长的
+    const all = [...map.values()];
+    const words = all.filter((w) => !all.some((o) => o !== w && o.text.length > w.text.length && o.text.includes(w.text)))
+        .sort((x, y) => Number(y.must) - Number(x.must) || y.count - x.count);
+    return { ...r, words };
+}
+
+/** “嘴角勾起一抹弧度、战栗×2…” */
+export function wordsText(words, n = 8, skip = []) {
+    const list = (words ?? []).filter((w) => !skip.includes(w.text));
+    const shown = list.slice(0, n).map((w) => (w.count > 1 ? `${w.text}×${w.count}` : w.text)).join('、');
+    return list.length > n ? `${shown} 等 ${list.length} 种` : shown;
 }
 
 /**
  * 只改含八股的整句，其余一字不动。call(system, prompt) 负责调 API。
  * @returns {Promise<{text:string, changed:number, failed:string[]}>}
  */
-export async function baguRewrite(text, kind, opts, call, isAborted = () => false) {
-    if (!engine || !opts) return { text, changed: 0, failed: [] };
-    const targets = engine.editTargets(text, opts, false);
-    if (!targets.length) return { text, changed: 0, failed: [] };
+export async function baguRewrite(text, kind, opts, call, isAborted = () => false, more = {}) {
+    const [r] = await baguRewriteMany([{ text, kind }], opts, call, isAborted, more);
+    return r;
+}
+
+/**
+ * 好几块一起改：所有块里要改的句子合在一起，每批 batch 句发一次，不按块分批。
+ * 第一轮没过检查的句子（原样交回、还带必改词、宏丢了），合在一起再发一轮，说明上次哪里不对。
+ * onlyMust=true 时只改含必改词（禁用词、我的八股词）的句子。
+ * @param {{text:string, kind:string}[]} items
+ * @returns {Promise<{text:string, changed:number, failed:string[]}[]>}
+ */
+export async function baguRewriteMany(items, opts, call, isAborted = () => false, { onlyMust = false, batch = 12, onProgress } = {}) {
+    const out = items.map((it) => ({ text: it.text, changed: 0, failed: [] }));
+    if (!engine || !opts) return out;
+    const must = (v) => engine.mustHits(v, opts);
+    const per = items.map((it) => {
+        let ts = engine.editTargets(it.text, opts, false);
+        if (onlyMust) ts = ts.filter((t) => must(t.text).length);
+        return ts;
+    });
+    const all = per.flatMap((ts, bi) => ts.map((t) => ({ t, bi, gid: `b${bi + 1}${t.id}`, kind: items[bi].kind })));
+    if (!all.length) return out;
     const pref = opts.aiPrompt || engine.DEFAULT_AI_PROMPT;
     const sys = pref.includes(engine.EDIT_CONTRACT) ? pref : `${pref}\n\n${engine.EDIT_CONTRACT}`;
-    const must = (v) => engine.mustHits(v, opts);
+    const kinds = [...new Set(items.map((it) => it.kind))];
     const validate = (t, v) => engine.editIssue(t, v)
-        || (v === t.text && t.hits.length ? '这句还没改' : '')
+        || (v === t.text && t.hits.length ? '这句还没改，原样交回来了' : '')
         || (must(v).length ? `还含必改词：${[...new Set(must(v).map((h) => h.match))].join('、')}` : '');
-    const replacements = new Map();
-    const failed = [];
-    let retries = 0;
-    const maxRetries = 3;
-    for (let i = 0; i < targets.length; i += 10) {
-        if (isAborted()) break;
-        const batch = targets.slice(i, i + 10);
-        const prompt = `【任务】下面是${kind}里含八股的句子，逐句修改。能删的套路词删掉；删了不通顺或丢内容的，整句改写成自然的说法。长短不限。整句只是空套路的，text 填空字符串。
-【格式】只输出 JSON：{"edits":[{"id":"s1","text":"改好的句子"}]}，每个 id 都要有。
+    const done = new Map(); // gid → 改好的句子
+    const why = new Map(); // gid → 上次的问题
+    const rounds = Math.ceil(all.length / batch);
+    let sent = 0;
+
+    async function send(list, retry) {
+        for (let i = 0; i < list.length; i += batch) {
+            if (isAborted()) return;
+            const part = list.slice(i, i + batch);
+            sent++;
+            onProgress?.({ sent, rounds, retry, sentences: all.length });
+            const prompt = `【任务】下面是${kinds.join('、')}里含八股的句子，逐句修改。能删的套路词删掉；删了不通顺或丢内容的，整句改写成自然的说法。长短不限。整句只是空套路的，text 填空字符串。${retry ? '\n这些句子上次没改好，“上次的问题”写了原因，这次一定要避开。' : ''}
+【格式】只输出 JSON：{"edits":[{"id":"b1s1","text":"改好的句子"}]}，每个 id 都要有。
 【句子】
-${JSON.stringify(batch.map((t) => ({ id: t.id, 句子: t.text, 八股: t.hits.map((h) => h.match), 前一句: t.prev, 后一句: t.next })), null, 1)}`;
-        let edits = new Map();
-        // 整批格式错了先整批重来一次，不逐句发请求
-        for (let t = 0; t < 2 && !edits.size; t++) {
-            if (isAborted()) break;
-            try { edits = engine.parseEdits(await call(sys, prompt)); } catch { edits = new Map(); }
-        }
-        for (const t of batch) {
-            if (isAborted()) break;
-            let v = edits.get(t.id);
-            if (!validate(t, v)) { replacements.set(t.id, v); continue; }
-            // 单句重做有上限，避免请求扎堆触发 429
-            if (retries >= maxRetries) { failed.push(t.text.slice(0, 30)); continue; }
-            retries++;
-            const retry = `【文本类型】${kind}
-【前一句】${t.prev || '（无）'}
-【要改的句子】${t.text}
-【后一句】${t.next || '（无）'}
-【这句里的八股】${t.hits.map((h) => h.match).join('、') || '（无）'}
-把这句改好：能删的删，删了不通顺就改写，长短不限。只输出改好的这一句；整句是空套路就输出 ""。`;
-            try {
-                v = String(await call(sys, retry)).trim();
-                if (v === '""' || v === '“”') v = '';
-            } catch { v = undefined; }
-            if (validate(t, v)) failed.push(t.text.slice(0, 30)); else replacements.set(t.id, v);
+${JSON.stringify(part.map((x) => ({
+                id: x.gid,
+                ...(kinds.length > 1 ? { 类型: x.kind } : {}),
+                句子: x.t.text,
+                八股: x.t.hits.map((h) => h.match),
+                ...(retry && why.get(x.gid) ? { 上次的问题: why.get(x.gid) } : {}),
+                前一句: x.t.prev,
+                后一句: x.t.next,
+            })), null, 1)}`;
+            let edits = new Map();
+            // 整批格式错了整批重来一次
+            for (let k = 0; k < 2 && !edits.size; k++) {
+                if (isAborted()) return;
+                try { edits = engine.parseEdits(await call(sys, prompt)); } catch { edits = new Map(); }
+            }
+            for (const x of part) {
+                const v = edits.get(x.gid);
+                const bad = validate(x.t, v);
+                if (bad) why.set(x.gid, bad); else { done.set(x.gid, v); why.delete(x.gid); }
+            }
         }
     }
-    return { text: engine.applyEdits(text, targets, replacements), changed: replacements.size, failed };
+
+    await send(all, false);
+    const left = all.filter((x) => !done.has(x.gid));
+    if (left.length && !isAborted()) await send(left, true);
+
+    per.forEach((ts, bi) => {
+        const rep = new Map();
+        for (const x of all) if (x.bi === bi && done.has(x.gid)) rep.set(x.t.id, done.get(x.gid));
+        out[bi] = {
+            text: rep.size ? engine.applyEdits(items[bi].text, ts, rep) : items[bi].text,
+            changed: rep.size,
+            failed: all.filter((x) => x.bi === bi && !done.has(x.gid)).map((x) => x.t.text.slice(0, 30)),
+        };
+    });
+    return out;
 }
 
 /** 像规则/提示词的条目（本身就列着禁用词），八股清理跳过 */

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { setBaguEngine, baguOptions, baguScan, baguRewrite } from '../src/bagu.js';
+import { setBaguEngine, baguOptions, baguScan, baguRewrite, baguRewriteMany, wordsText } from '../src/bagu.js';
 import { callLLM, presetMessages } from '../src/llm.js';
 
 let passed = 0;
@@ -34,7 +34,7 @@ await check('八股清理：只改含八股的句子，<user> 和 {{char}} 不�
     assert.equal(calls.length, 1);
 });
 
-await check('八股清理：没改好的句子单句重做，还不行就保留原句', async () => {
+await check('八股清理：没改好的句子再批量重做一轮，还不行就保留原句', async () => {
     const opts = baguOptions({ baguCleaner: { userWords: '低笑' } });
     const replies = ['不是 JSON', '{{char}}低笑。'];
     const out = await baguRewrite('{{char}}低笑。', '人设', opts, async () => replies.shift());
@@ -157,15 +157,55 @@ await check('API：两次调用之间按设置间隔', async () => {
     assert.ok(times[1] - times[0] >= 280, `间隔 ${times[1] - times[0]}ms`);
 });
 
-await check('八股清理：整批格式错了只整批重来，单句重做最多 3 次', async () => {
+await check('八股清理：整批格式错了整批重来一次；没过的句子合在一起再发一轮，不逐句发', async () => {
     const opts = baguOptions({ baguCleaner: { userWords: '低笑' } });
     const text = Array.from({ length: 8 }, (_, i) => `他${i}低笑。`).join('');
     let calls = 0;
     const out = await baguRewrite(text, '人设', opts, async () => { calls++; return '不是 JSON'; });
-    assert.equal(calls, 2 + 3, '整批 2 次 + 单句 3 次');
-    assert.equal(out.failed.length, 5, '超过上限的 5 句直接保留原句');
+    assert.equal(calls, 2 + 2, '第一轮 2 次 + 重做一轮 2 次');
+    assert.equal(out.failed.length, 8);
+    assert.equal(out.text, text);
     const ex = baguOptions({ baguCleaner: { userWords: '' } }, ['执念']);
     assert.ok(baguScan('他的执念', ex).must >= 1, '写卡工坊的禁用词也算必改');
+});
+
+await check('八股清理：好几块的句子合在一起分批，结果各回各块；重做时告诉 AI 上次哪里不对', async () => {
+    const opts = baguOptions({ baguCleaner: { userWords: '低笑' } });
+    const items = Array.from({ length: 5 }, (_, b) => ({ text: Array.from({ length: 4 }, (_, i) => `块${b}句${i}低笑。`).join('平静的一句。'), kind: '开场白' }));
+    const prompts = [];
+    const res = await baguRewriteMany(items, opts, async (sys, prompt) => {
+        prompts.push(prompt);
+        const list = JSON.parse(prompt.slice(prompt.indexOf('【句子】') + 4));
+        // 第一轮故意把 b1 的句子原样交回，看重做
+        return JSON.stringify({ edits: list.map((t) => ({ id: t.id, text: t.id.startsWith('b1s') && !t.上次的问题 ? t.句子 : t.句子.replace('低笑', '笑了') })) });
+    }, () => false, { batch: 12 });
+    assert.equal(prompts.length, 2 + 1, '20 句：两批，再加一轮重做');
+    assert.ok(prompts[2].includes('上次的问题') && prompts[2].includes('原样交回'));
+    assert.equal(res.length, 5);
+    for (const [b, r] of res.entries()) {
+        assert.ok(!r.text.includes('低笑'), `块 ${b}`);
+        assert.ok(r.text.startsWith(`块${b}句0笑了。平静的一句。`));
+        assert.equal(r.changed, 4);
+    }
+});
+
+await check('八股清理：只改必改词时，普通八股的句子不动；扫描显示文中真正的词', async () => {
+    const opts = baguOptions({ baguCleaner: { userWords: '低笑\nre:骨节分明|若有若无' } });
+    const text = '他低笑。她的声音极其温柔。手指骨节分明。';
+    const seen = [];
+    const [r] = await baguRewriteMany([{ text, kind: '开场白' }], opts, async (sys, prompt) => {
+        const list = JSON.parse(prompt.slice(prompt.indexOf('【句子】') + 4));
+        seen.push(...list.map((t) => t.句子));
+        return JSON.stringify({ edits: list.map((t) => ({ id: t.id, text: t.句子.replace('低笑', '笑').replace('骨节分明', '很长') })) });
+    }, () => false, { onlyMust: true });
+    assert.deepEqual(seen, ['他低笑。', '手指骨节分明。']);
+    assert.ok(r.text.includes('她的声音极其温柔。'), '普通八股不动');
+    const sc = baguScan(text, opts);
+    const words = sc.words.map((w) => w.text);
+    assert.ok(words.includes('骨节分明') && words.includes('低笑'));
+    assert.ok(!words.some((w) => w.includes('(?:') || w.includes('|')), '不显示规则的写法');
+    assert.ok(sc.words[0].must, '必改的排前面');
+    assert.ok(wordsText([{ text: 'a', count: 2 }, { text: 'b', count: 1 }], 1).startsWith('a×2 等 2 种'));
 });
 
 console.log(`\n${passed} passed`);
