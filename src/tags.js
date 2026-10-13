@@ -17,8 +17,9 @@ const RAW = [
         ],
     },
     {
-        key: 'cp', name: '性向', single: true, required: true, tags: [
+        key: 'cp', name: '性向', required: true, tags: [
             'BG|BG,言情,男女主',
+            'GB|GB,女攻,女强男弱',
             'BL|BL,耽美,纯爱,男男',
             'GL|GL,百合,女女',
             '无CP|无CP,不谈恋爱,纯友情,事业线',

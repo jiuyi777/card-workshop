@@ -117,40 +117,79 @@ const draft = () => ctx.extensionSettings.cardWorkshop.draft;
 await import(pathToFileURL(path.join(tp, 'card-workshop', 'index.js')).href);
 await until(() => $('#cw_menu_button').length && $('.cw-settings').length);
 
-await check('扩展加载：魔棒菜单和设置面板都有', () => {
+async function go(page) {
+    const el = cw().find(`[data-act="go"][data-page="${page}"]`).get(0) ?? (page !== 'home' ? (await go('home'), cw().find(`[data-act="go"][data-page="${page}"]`).get(0)) : null);
+    assert.ok(el, `找不到去 ${page} 的入口`);
+    el.click();
+    await tick();
+}
+const title = () => cw().find('.cw-ptitle').text();
+
+await check('扩展加载：魔棒菜单和设置面板都有，提示词编辑不在设置面板里', () => {
     assert.ok($('#cw_menu_button').text().includes('写卡工坊'));
-    assert.ok($('.cw-settings').text().includes('步骤提示词'));
-    assert.ok($('.cw-settings .cw-step-ta').val().includes('【任务】为角色「{{name}}」写人设'), '默认显示人设步骤的提示词');
+    assert.ok($('.cw-settings').text().includes('目录 → 提示词'));
+    assert.equal($('.cw-settings .cw-step-ta').length, 0);
 });
 
-await check('打开写卡工坊，一句话生成构想，标签自动勾上', async () => {
+await check('打开是目录：每一步一个入口，提示“下一步”', async () => {
     $('#cw_menu_button').trigger('click');
     await until(() => cw().length);
+    assert.equal(cw().find('.cw-tile').length, 12, '11 步 + 提示词');
+    assert.ok(cw().find('.cw-next').text().includes('一句话构想'));
+    assert.equal(cw().find('textarea[data-bind="idea"]').length, 0, '目录页不堆内容');
+});
+
+await check('一句话构想页：生成构想，标签页里自动勾上（性向多选）', async () => {
+    await go('idea');
+    assert.ok(title().includes('一句话构想'));
     type('textarea[data-bind="idea"]', '“最后抱我一次吧，在春天结束之前。”……可春天已在你眼前离去了。');
     await click('[data-act="idea"]');
     assert.equal(draft().concepts.length, 1);
     assert.ok(cw().find('.cw-card').text().includes('他每年春天回来'));
-    const on = cw().find('.cw-chip.tag.on').map((_, e) => e.textContent).get();
+    assert.ok(cw().find('.cw-foot').text().includes('下一步：标签'));
+    await go('tags');
+    const on = cw().find('.cw-chips').first().find('.cw-chip.tag.on').map((_, e) => e.textContent).get();
     for (const n of ['BG?', '1v1?', '酸涩', 'BE']) assert.ok(on.includes(n), `${n}：${on.join(' ')}`);
     assert.ok(cw().text().includes('新标签：季节限定'));
+    await click('[data-act="tag"][data-dim="cp"][data-name="GB"]');
+    assert.deepEqual(draft().tags.filter((t) => t.dim === 'cp').map((t) => t.name), ['BG', 'GB'], '性向可以同时选 BG 和 GB');
+    await click('[data-act="tag"][data-dim="cp"][data-name="GB"]');
 });
 
-await check('收录新标签，选构想', async () => {
+await check('收录新标签，回构想页选构想', async () => {
     await click('[data-act="adoptTag"]');
     assert.ok(ctx.extensionSettings.cardWorkshop.customTags.plot.includes('季节限定|季节限定'));
     assert.ok(draft().tags.some((t) => t.name === '季节限定'));
+    await go('idea');
     await click('[data-act="pick"]');
     assert.equal(draft().name, '迟春');
+    await go('home');
     assert.ok(cw().find('input[data-bind="name"]').val() === '迟春');
+    assert.ok(cw().find('.cw-tile.done').text().includes('一句话构想'));
+    assert.ok(cw().find('.cw-next').text().includes('主要人设'), '下一步提示指向人设');
+});
+
+await check('掷骰子：选了答案后有醒目的“用回答生成构想”', async () => {
+    const d = draft();
+    d.dice = { era: '古言' };
+    d.inspire = [{ q: '谁欠了谁？', options: ['他欠她一条命', '两清了'], answer: '' }];
+    await go('idea');
+    await click('.cw-opt[data-val="两清了"]');
+    assert.equal(draft().inspire[0].answer, '两清了');
+    assert.equal(cw().find('input[data-bind="inspire.0.answer"]').val(), '', '点了选项，输入框不重复显示');
+    assert.ok(cw().find('.cw-primary[data-act="ideaFromInspire"]').length);
+    d.dice = {}; d.inspire = [];
 });
 
 await check('问答：点选项，答案写进草稿', async () => {
+    await go('persona');
     await click('[data-act="qa"]');
     await click('.cw-opt[data-val="锚"]');
     assert.equal(draft().qa.chars[0].questions[0].answer, '锚');
 });
 
-await check('一键出卡：人设 → 世界观 → NPC → 路线 → 基调 → 开场白 → 可预测性重写 → 八股清理 → 质检', async () => {
+await check('一键出卡（在目录）：跑完后跳到质检页', async () => {
+    await go('home');
     await click('[data-act="auto"]');
     const d = draft();
     assert.ok(d.personas[0].text.includes('还回去'), '撞车的那句被重写');
@@ -165,13 +204,15 @@ await check('一键出卡：人设 → 世界观 → NPC → 路线 → 基调 �
         assert.ok(prompts.some((p) => p.includes('整句修改约束')), '用了八股清理的提示词');
     }
     assert.ok(prompts.find((p) => p.includes('为角色「迟春」写人设')).includes('锚'), '问答答案进了人设提示词');
-    assert.ok(cw().find('[data-sec="check"]').prop('open'));
+    assert.ok(title().includes('质检'));
     assert.ok(toasts.every((t) => t[0] !== 'err'), JSON.stringify(toasts));
 });
 
 await check('手动编辑：改人设文本、加一个自由模块', async () => {
+    await go('persona');
     type('textarea[data-bind="personas.0.overview"]', '他是春天本身。');
     assert.equal(draft().personas[0].overview, '他是春天本身。');
+    await go('tone');
     await click('[data-act="add"][data-path="free"]');
     type('input[data-bind="free.0.name"]', '信物');
     type('textarea[data-bind="free.0.content"]', '<信物>旧怀表</信物>');
@@ -180,6 +221,7 @@ await check('手动编辑：改人设文本、加一个自由模块', async () =
 
 await check('导入酒馆：世界书不重名、条目按桶型排、角色卡绑定世界书', async () => {
     worlds['迟春'] = { entries: {} };
+    await go('import');
     await click('[data-act="import"]');
     const book = worlds['迟春 (2)'];
     assert.ok(book, `世界书：${Object.keys(worlds)}`);
@@ -212,6 +254,7 @@ await check('切换路线：只开选中的那条', async () => {
 
 await check('简介：生成、换标题、写进角色卡', async () => {
     ctx.extensionSettings.cardWorkshop.author = 'if love';
+    await go('intro');
     await click('[data-act="intro"]');
     let text = draft().intro.text;
     assert.ok(text.startsWith('【BG|1v1|'));
@@ -226,26 +269,39 @@ await check('简介：生成、换标题、写进角色卡', async () => {
     assert.equal(merge.data.creator_notes, text);
 });
 
-await check('设置：改步骤提示词和规则库，生成时生效；恢复默认', async () => {
+await check('提示词页：改步骤提示词和规则库，生成时生效；恢复默认', async () => {
     const s = ctx.extensionSettings.cardWorkshop;
-    $('.cw-settings .cw-rule-ta').val('只写特异点。自定义规则X').trigger('input');
+    await go('prompts');
+    assert.ok(cw().find('.cw-step-ta').val().includes('【任务】为角色「{{name}}」写人设'), '默认显示人设步骤');
+    const ta = cw().find('.cw-step-ta').get(0);
+    ta.value = ta.value + '\n我自己加的一句Y';
+    ta.dispatchEvent(new window.Event('input', { bubbles: true }));
+    assert.ok(s.prompts.persona.includes('我自己加的一句Y'));
+    await click('[data-act="ptab"][data-tab="rule"]');
+    const rt = cw().find('.cw-rule-ta').get(0);
+    rt.value = '只写特异点。自定义规则X';
+    rt.dispatchEvent(new window.Event('input', { bubbles: true }));
     assert.equal(s.rules['通用'], '只写特异点。自定义规则X');
+    await go('persona');
     await click('[data-act="persona"]');
-    assert.ok(prompts.at(-1).includes('自定义规则X'), '人设步骤用了改过的规则');
-    $('.cw-settings .cw-rule-reset').trigger('click');
+    assert.ok(prompts.at(-1).includes('自定义规则X') && prompts.at(-1).includes('我自己加的一句Y'), '人设步骤用了改过的提示词和规则');
+    await go('prompts');
+    await click('[data-act="ptab"][data-tab="rule"]');
+    await click('[data-act="resetRule"]');
     assert.equal(s.rules['通用'], '');
+    await click('[data-act="ptab"][data-tab="step"]');
+    await click('[data-act="resetStep"]');
+    assert.equal(s.prompts.persona, '');
 });
 
-await check('我的步骤：设置里加一个，写卡里出现按钮，产出成为自由模块', async () => {
+await check('我的步骤：提示词页里加一个，基调页出现按钮，产出成为自由模块', async () => {
     const s = ctx.extensionSettings.cardWorkshop;
-    $('.cw-settings .cw-step-add').trigger('click');
+    await click('[data-act="ptab"][data-tab="mine"]');
+    await click('[data-act="addStep"]');
     assert.equal(s.customSteps.length, 1);
-    $('.cw-settings [data-step="0"][data-key="name"]').val('预言').trigger('input');
-    $('.cw-settings [data-step="0"][data-key="template"]').val('为{{concept}}写一则预言。只写特异点。帮作者想清楚').trigger('input');
-    // 重新打开写卡工坊的视图
-    cw().parent().remove();
-    $('#cw_menu_button').trigger('click');
-    await until(() => cw().find('[data-act="custom"]').length);
+    type('[data-step="0"][data-key="name"]', '预言');
+    type('[data-step="0"][data-key="template"]', '为{{concept}}写一则预言。只写特异点。帮作者想清楚');
+    await go('tone');
     const before = draft().free.length;
     await click('[data-act="custom"]');
     assert.equal(draft().free.length, before + 1);
@@ -253,6 +309,7 @@ await check('我的步骤：设置里加一个，写卡里出现按钮，产出�
 });
 
 await check('新建草稿：旧的进历史，能读回来', async () => {
+    await go('home');
     await click('[data-act="newDraft"]');
     assert.equal(draft().idea, '');
     const s = ctx.extensionSettings.cardWorkshop;

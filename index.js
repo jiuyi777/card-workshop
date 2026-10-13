@@ -9,7 +9,7 @@ import { callLLM, listProfiles, listPresets } from './src/llm.js';
 import { loadBagu, hasBagu, baguOptions, baguScan, baguRewrite } from './src/bagu.js';
 
 const MODULE = 'cardWorkshop';
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const getCtx = () => SillyTavern.getContext();
 
 const DEFAULTS = {
@@ -38,7 +38,7 @@ const DEFAULTS = {
     drafts: [],
 };
 
-const state = { busy: false, abort: false, root: null, open: new Set(['idea']), checks: null, bagu: null, editStep: 'persona', editRule: '通用', editDim: 'era' };
+const state = { busy: false, abort: false, root: null, page: 'home', checks: null, bagu: null, editStep: 'persona', editRule: '通用', editDim: 'era', ptab: 'step' };
 
 // ───────────── 设置与草稿 ─────────────
 
@@ -89,33 +89,75 @@ const ta = (path, rows = 6, ph = '') => `<textarea class="text_pole cw-ta" data-
 const inp = (path, ph = '', cls = '') => `<input class="text_pole cw-in ${cls}" data-bind="${path}" value="${esc(getPath(draft(), path) ?? '')}" placeholder="${esc(ph)}">`;
 const listInp = (path, ph = '关键词，逗号分隔') => `<input class="text_pole cw-in" data-bind-list="${path}" value="${esc((getPath(draft(), path) ?? []).join('，'))}" placeholder="${esc(ph)}">`;
 
-function sec(id, title, body, note = '') {
-    return `<details class="cw-sec" data-sec="${id}" ${state.open.has(id) ? 'open' : ''}>
-<summary class="cw-title">${title}${note ? ` <small class="cw-dim">${note}</small>` : ''}</summary>
-<div class="cw-body">${body}</div></details>`;
-}
-
 function issuesHtml(issues) {
     if (!issues?.length) return '';
     return `<div class="cw-issues">${issues.map((i) => `<span class="cw-issue ${i.level}">${esc(i.label)}${i.match ? `：${esc(i.match)}` : ''}</span>`).join('')}</div>`;
 }
 
-function headerHtml() {
+/** 选项 + 自己写：点了选项时输入框不重复显示同一句 */
+function answerHtml(path, options, ph = '或者自己写') {
+    const cur = getPath(draft(), path) ?? '';
+    const own = options.includes(cur) ? '' : cur;
+    return `<div class="cw-opts">${options.map((o) => `<span class="cw-opt ${cur === o ? 'on' : ''}" data-act="answer" data-path="${path}" data-val="${esc(o)}">${esc(o)}</span>`).join('')}</div>
+<input class="text_pole cw-in cw-own" data-bind="${path}" value="${esc(own)}" placeholder="${esc(ph)}">`;
+}
+
+// ───────────── 页面：目录 + 二级页 ─────────────
+
+const PAGES = [
+    { id: 'idea', name: '一句话构想', desc: '一句话脑洞，或者掷骰子', status: (d) => (d.pick >= 0 && d.concepts[d.pick] ? d.concepts[d.pick].title : d.concepts.length ? `${d.concepts.length} 个构想，还没选` : ''), done: (d) => d.pick >= 0 && !!d.concepts[d.pick] },
+    { id: 'tags', name: '标签', desc: '构想时自动勾好，可以再改', status: (d) => d.tags.map((t) => t.name).slice(0, 6).join('、'), done: (d) => d.tags.length > 0 },
+    { id: 'persona', name: '主要人设', desc: '先答问题，再生成', status: (d) => d.personas.map((p) => `${p.name}${p.text ? ' ✓' : ''}`).join('、'), done: (d) => d.personas.length > 0 && d.personas.every((p) => p.text) },
+    { id: 'world', name: '世界观', status: (d) => (d.world.main ? '已写' : ''), done: (d) => !!d.world.main },
+    { id: 'npc', name: 'NPC', status: (d) => (d.npcs.length ? `${d.npcs.length} 个` : ''), done: (d) => d.npcs.length > 0 || d.concepts[d.pick]?.npcs === 0 },
+    { id: 'routes', name: '玩家与路线', status: (d) => (d.routes.length ? `${d.routes.filter((r) => r.info).length}/${d.routes.length} 条已写` : ''), done: (d) => d.routes.length > 0 && d.routes.every((r) => r.info) },
+    { id: 'tone', name: '基调与规则', desc: '还有自由模块', status: (d) => (d.tone ? '已写' : ''), done: (d) => !!d.tone },
+    { id: 'greet', name: '开场白', status: (d) => (d.greetings.length ? `${d.greetings.length} 个` : ''), done: (d) => d.greetings.length > 0 },
+    { id: 'check', name: '质检', desc: '本地扫描 · 八股清理', status: () => (state.checks ? '扫描过' : ''), done: () => !!state.checks },
+    { id: 'import', name: '导入酒馆', status: (d) => (d.imported ? `已导入：${d.imported.name}` : ''), done: (d) => !!d.imported },
+    { id: 'intro', name: '简介', desc: 'Discord 简介和标题', status: (d) => (d.intro?.text ? '已写' : ''), done: (d) => !!d.intro?.text },
+];
+
+const nextPage = (d) => PAGES.find((p) => !p.done(d)) ?? null;
+
+function topHtml(inner) {
+    return `<div class="cw-top">${inner}
+  <div class="cw-row cw-statusrow"><span class="cw-status cw-grow"></span><div class="menu_button cw-btn cw-stop" data-act="stop" style="display:${state.busy ? '' : 'none'}">停止</div></div>
+</div>`;
+}
+
+function homeHtml() {
     const d = draft();
     const s = settings();
     const hist = (s.drafts ?? []).map((x, i) => `<option value="${i}">${esc(x.name || x.idea?.slice(0, 16) || '未命名')} · ${new Date(x.updated).toLocaleDateString()}</option>`).join('');
-    return `<div class="cw-top">
-  <div class="cw-row">
-    <input class="text_pole cw-in cw-grow" data-bind="name" value="${esc(d.name)}" placeholder="卡名（导入时用）">
-    ${btn('newDraft', '新建')}
-    <select class="text_pole cw-hist"><option value="">历史草稿</option>${hist}</select>
-  </div>
-  <div class="cw-row">
-    ${btn('auto', '一键出卡', 'class="cw-primary"')}
-    <div class="menu_button cw-btn cw-stop" data-act="stop" style="display:${state.busy ? '' : 'none'}">停止</div>
-  </div>
-  <div class="cw-status"></div>
+    const n = nextPage(d);
+    const tile = (p, i) => {
+        const st = p.status?.(d) || '';
+        return `<div class="cw-tile ${p.done(d) ? 'done' : ''} ${n?.id === p.id ? 'next' : ''}" data-act="go" data-page="${p.id}">
+<div class="cw-tn">${i + 1}. ${esc(p.name)}${p.done(d) ? ' <span class="cw-ok">✓</span>' : ''}</div>
+<div class="cw-ts">${esc(st || p.desc || '还没开始')}</div></div>`;
+    };
+    return `${topHtml(`<div class="cw-row"><input class="text_pole cw-in cw-grow" data-bind="name" value="${esc(d.name)}" placeholder="卡名（导入时用）">${btn('newDraft', '新建')}</div>
+${hist ? `<select class="text_pole cw-hist"><option value="">历史草稿（${s.drafts.length}）</option>${hist}</select>` : ''}`)}
+<div class="cw-next">
+  ${n ? `<div class="cw-dim cw-small">下一步</div><div class="menu_button cw-btn cw-primary" data-act="go" data-page="${n.id}">${esc(n.name)} →</div>` : '<div>全部完成了。</div>'}
+  <div class="cw-row">${btn('auto', '一键出卡')}<span class="cw-dim cw-small cw-grow">写好一句话后点，自动跑完剩下的步骤；已经写好的不会重写</span></div>
+</div>
+<div class="cw-grid">${PAGES.map(tile).join('')}
+<div class="cw-tile cw-tool" data-act="go" data-page="prompts"><div class="cw-tn">提示词</div><div class="cw-ts">每一步的提示词、规则库、我的标签、我的步骤</div></div>
 </div>`;
+}
+
+function pageHtml(id) {
+    const i = PAGES.findIndex((p) => p.id === id);
+    const page = PAGES[i];
+    const title = page ? `${i + 1}. ${page.name}` : '提示词';
+    const body = { idea: ideaHtml, tags: tagsHtml, persona: personaHtml, world: worldHtml, npc: npcHtml, routes: routesHtml, tone: toneHtml, greet: greetingHtml, check: checkHtml, import: importHtml, intro: introHtml, prompts: promptsHtml }[id]();
+    const prev = PAGES[i - 1];
+    const next = PAGES[i + 1];
+    return `${topHtml(`<div class="cw-row"><div class="menu_button cw-btn" data-act="go" data-page="home">← 目录</div><b class="cw-grow cw-ptitle">${esc(title)}</b></div>`)}
+<div class="cw-page">${body}</div>
+<div class="cw-foot">${prev ? `<div class="menu_button cw-btn" data-act="go" data-page="${prev.id}">← ${esc(prev.name)}</div>` : ''}<span class="cw-grow"></span>${next ? `<div class="menu_button cw-btn cw-primary" data-act="go" data-page="${next.id}">下一步：${esc(next.name)} →</div>` : `<div class="menu_button cw-btn" data-act="go" data-page="home">回目录</div>`}</div>`;
 }
 
 function ideaHtml() {
@@ -125,10 +167,9 @@ function ideaHtml() {
     if (Object.keys(d.dice ?? {}).length || d.inspire?.length) {
         const dice = Object.entries(d.dice ?? {}).map(([k, v]) => `<label class="cw-chip ${d.diceLock?.[k] ? 'on' : ''}"><input type="checkbox" data-act="lockDice" data-dim="${k}" ${d.diceLock?.[k] ? 'checked' : ''}>${esc(dimOf(lib(), k)?.name ?? k)}：${esc(v)}</label>`).join('');
         const qs = (d.inspire ?? []).map((q, i) => `<div class="cw-q"><div class="cw-qt">${esc(q.q)}</div>
-<div class="cw-opts">${q.options.map((o) => `<span class="cw-opt ${q.answer === o ? 'on' : ''}" data-act="answer" data-path="inspire.${i}.answer" data-val="${esc(o)}">${esc(o)}</span>`).join('')}</div>
-${inp(`inspire.${i}.answer`, '自己写')}</div>`).join('');
-        html += `<div class="cw-box"><div class="cw-sub">骰子 <small class="cw-dim">勾上的下次不换</small></div><div class="cw-chips">${dice}</div>${qs}
-<div class="cw-row">${btn('inspire', '换一批')}${btn('ideaFromInspire', '用这些回答生成构想')}</div></div>`;
+${answerHtml(`inspire.${i}.answer`, q.options)}</div>`).join('');
+        html += `<div class="cw-box"><div class="cw-sub">骰子 <small class="cw-dim">勾上的“换一批”时不换</small></div><div class="cw-chips">${dice}</div>${qs}
+<div class="cw-row">${btn('inspire', '换一批')}<div class="menu_button cw-btn cw-primary" data-act="ideaFromInspire">选好了，用回答生成构想 →</div></div></div>`;
     }
     if (d.fandom || d.check?.length) {
         html += `<div class="cw-box"><div class="cw-sub">同人：${esc(d.fandom)}</div><div class="cw-dim">确认 AI 没记错原作：</div><ul>${d.check.map((c) => `<li>${esc(c)}</li>`).join('')}</ul></div>`;
@@ -143,7 +184,7 @@ ${c.user.length ? `<div>〔user〕：${esc(c.user.join(' / '))}</div>` : ''}
 ${c.tension.core ? `<div>张力：${esc(c.tension.core)}</div>` : ''}
 ${c.tension.expect.length ? `<div>期待点：${esc(c.tension.expect.join('；'))}</div>` : ''}
 <div class="cw-dim">世界观：${esc(c.complexity)}${c.reason ? `（${esc(c.reason)}）` : ''} · 路线：${esc(c.routes.map((r) => r.name).join('、'))} · NPC ${c.npcs}</div>
-<div class="cw-row">${picked ? '<span class="cw-badge ok">已选</span>' : btn('pick', '选这个', `data-i="${i}"`)}</div>
+<div class="cw-row">${picked ? '<span class="cw-badge ok">已选这个</span>' : btn('pick', '选这个', `data-i="${i}"`)}</div>
 ${picked ? `<details class="cw-mini"><summary>改构想</summary>
 ${inp(`concepts.${i}.title`, '标题')}
 ${ta(`concepts.${i}.relation`, 3, '关系与前情')}
@@ -158,7 +199,7 @@ function tagsHtml() {
     const L = lib();
     const src = d.tagSrc ?? {};
     const chip = (t, on) => `<span class="cw-chip tag ${on ? 'on' : ''} src-${src[`${t.dim}:${t.name}`] ?? 'user'}" data-act="tag" data-dim="${t.dim}" data-name="${esc(t.name)}">${esc(t.name)}${src[`${t.dim}:${t.name}`] === 'guess' ? '?' : ''}</span>`;
-    let html = `<div class="cw-dim cw-small">实心：一句话里识别到的；虚线：AI 推荐；带问号：AI 推测的必填项，确认一下。点一下开关。</div>`;
+    let html = `<div class="cw-dim cw-small">上面是已选的标签，点一下取消；下面按维度展开，点一下选上。实线框是你那句话里识别到的，虚线框是 AI 推荐的，带问号的是 AI 猜的，确认一下。</div>`;
     html += `<div class="cw-chips">${(d.tags ?? []).map((t) => chip(t, true)).join('') || '<span class="cw-dim">还没有标签</span>'}</div>`;
     if (d.ai?.novel?.length || d.ai?.surprise) {
         html += `<div class="cw-box">`;
@@ -177,8 +218,7 @@ function personaHtml() {
     let html = `<div class="cw-row">${btn('qa', d.qa?.chars?.length ? '换一批问题' : '出问题（给脑洞）')}${btn('allPersonas', '生成全部人设')}</div>`;
     (d.qa?.chars ?? []).forEach((c, ci) => {
         html += `<div class="cw-box"><div class="cw-sub">${esc(c.name)} 的问题</div>${c.questions.map((q, qi) => `<div class="cw-q"><div class="cw-qt">${esc(q.q)}</div>
-<div class="cw-opts">${q.options.map((o) => `<span class="cw-opt ${q.answer === o ? 'on' : ''}" data-act="answer" data-path="qa.chars.${ci}.questions.${qi}.answer" data-val="${esc(o)}">${esc(o)}</span>`).join('')}</div>
-${inp(`qa.chars.${ci}.questions.${qi}.answer`, '自己写，或者留空让 AI 决定')}</div>`).join('')}</div>`;
+${answerHtml(`qa.chars.${ci}.questions.${qi}.answer`, q.options, '或者自己写；留空让 AI 决定')}</div>`).join('')}</div>`;
     });
     d.personas.forEach((p, i) => {
         const pr = d.predict?.[p.name];
@@ -229,7 +269,7 @@ ${inp(`free.${i}.desc`, '几句话描述它是什么')}
 <select class="text_pole" data-bind="free.${i}.position"><option value="after" ${f.position !== 'before' ? 'selected' : ''}>角色定义之后</option><option value="before" ${f.position === 'before' ? 'selected' : ''}>角色定义之前</option></select></div>
 ${listInp(`free.${i}.keys`)}${ta(`free.${i}.content`, 6)}</div>`).join('')}
 <div class="cw-row">${btn('add', '加一个模块', 'data-path="free" data-tpl="free"')}</div>
-${steps.length ? `<div class="cw-sub">我的步骤</div><div class="cw-row">${steps.map((st, i) => btn('custom', esc(st.name || `步骤${i + 1}`), `data-i="${i}"`)).join('')}</div>` : '<div class="cw-dim cw-small">想加自己的步骤：扩展设置 → 写卡工坊 → 我的步骤。</div>'}`;
+${steps.length ? `<div class="cw-sub">我的步骤</div><div class="cw-row">${steps.map((st, i) => btn('custom', esc(st.name || `步骤${i + 1}`), `data-i="${i}"`)).join('')}</div>` : '<div class="cw-dim cw-small">想加自己的步骤：目录 → 提示词 → 我的步骤。</div>'}`;
 }
 
 function greetingHtml() {
@@ -286,24 +326,48 @@ ${ta('intro.text', 16)}
 <div class="cw-dim cw-small">作者名、授权、预设参考在扩展设置里填。</div>`;
 }
 
+const STEP_TEMPLATE = '【任务】为这张卡写……\n\n【构想】\n{{concept}}\n【主要角色概要】\n{{overviews}}\n\n【写法规则】\n{{rules.通用}}';
+
+function promptsHtml() {
+    const s = settings();
+    const opt = (v, label, cur) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(label)}</option>`;
+    const tabs = [['step', '每一步的提示词'], ['rule', '规则库'], ['tag', '我的标签'], ['mine', '我的步骤']];
+    let body = '';
+    if (state.ptab === 'step') {
+        const id = state.editStep;
+        body = `<div class="cw-dim cw-small">选一个步骤，直接在框里改或者整段粘贴你自己的提示词，自动保存。改坏了点“恢复默认”。用 {{变量}} 引用前面步骤的产出，下面有列表。</div>
+<select class="text_pole cw-step-sel">${Object.keys(DEFAULT_PROMPTS).map((k) => opt(k, `${STEP_INFO[k]?.name ?? k}${s.prompts[k]?.trim() ? '（已改）' : ''}`, id)).join('')}</select>
+<textarea class="text_pole cw-ta cw-step-ta" rows="16">${esc(s.prompts[id]?.trim() ? s.prompts[id] : DEFAULT_PROMPTS[id])}</textarea>
+<div class="cw-row">${btn('resetStep', '恢复这一步的默认')}</div>
+<details class="cw-mini"><summary>可用变量</summary><div class="cw-small">${Object.entries(TEMPLATE_VARS).map(([k, v]) => `<code>{{${esc(k)}}}</code> ${esc(v)}`).join('<br>')}</div></details>`;
+    } else if (state.ptab === 'rule') {
+        const k = state.editRule;
+        body = `<div class="cw-dim cw-small">规则库被多个步骤共用（提示词里写 {{rules.名称}} 的地方），改一处全部生效。你教程里的写法规则可以直接粘进来。</div>
+<select class="text_pole cw-rule-sel">${Object.keys(DEFAULT_RULES).map((r) => opt(r, `${r}${s.rules[r]?.trim() ? '（已改）' : ''}`, k)).join('')}</select>
+<textarea class="text_pole cw-ta cw-rule-ta" rows="14">${esc(s.rules[k]?.trim() ? s.rules[k] : DEFAULT_RULES[k])}</textarea>
+<div class="cw-row">${btn('resetRule', '恢复这条规则的默认')}</div>`;
+    } else if (state.ptab === 'tag') {
+        body = `<div class="cw-dim cw-small">每行一个：名称|触发词,触发词。触发词出现在一句话脑洞里就自动勾上。</div>
+<select class="text_pole cw-dim-sel">${lib().map((d) => opt(d.key, d.name, state.editDim)).join('')}</select>
+<textarea class="text_pole cw-ta cw-dim-ta" rows="6" placeholder="蒸汽朋克|蒸汽,齿轮城">${esc((s.customTags[state.editDim] ?? []).join('\n'))}</textarea>`;
+    } else {
+        body = `<div class="cw-dim cw-small">自己加的步骤会在“基调与规则”页里出现一个按钮，产出写成一个自由模块，导入时进世界书。</div>
+${(s.customSteps ?? []).map((st, i) => `<div class="cw-card">
+<input class="text_pole cw-in" data-step="${i}" data-key="name" value="${esc(st.name)}" placeholder="步骤名（也是模块名）">
+<div class="cw-row"><select class="text_pole" data-step="${i}" data-key="stage">${opt('card', '用写卡预设', st.stage)}${opt('greeting', '用开场白预设', st.stage)}</select>
+<select class="text_pole" data-step="${i}" data-key="light">${opt('blue', '蓝灯', st.light)}${opt('green', '绿灯', st.light)}</select>
+<select class="text_pole" data-step="${i}" data-key="position">${opt('after', '角色后', st.position)}${opt('before', '角色前', st.position)}</select></div>
+<input class="text_pole cw-in" data-step="${i}" data-key="keys" value="${esc((st.keys ?? []).join('，'))}" placeholder="绿灯关键词">
+<textarea class="text_pole cw-ta" rows="8" data-step="${i}" data-key="template">${esc(st.template)}</textarea>
+<div class="cw-row cw-end">${btn('delStep', '删除这个步骤', `data-i="${i}"`)}</div></div>`).join('')}
+<div class="cw-row">${btn('addStep', '加一个步骤')}</div>`;
+    }
+    return `<div class="cw-tabs">${tabs.map(([k, n]) => `<span class="cw-tab ${state.ptab === k ? 'on' : ''}" data-act="ptab" data-tab="${k}">${n}</span>`).join('')}</div>${body}`;
+}
+
 function renderAll() {
     if (!state.root) return;
-    const d = draft();
-    const pickedNote = d.pick >= 0 && d.concepts[d.pick] ? esc(d.concepts[d.pick].title) : '';
-    state.root.innerHTML = `<div class="cw">
-${headerHtml()}
-${sec('idea', '① 一句话构想', ideaHtml(), pickedNote)}
-${sec('tags', '② 标签', tagsHtml(), esc(d.tags.map((t) => t.name).slice(0, 6).join('、')))}
-${sec('persona', '③ 主要人设', personaHtml(), esc(d.personas.map((p) => `${p.name}${p.text ? '✓' : ''}`).join('、')))}
-${sec('world', '④ 世界观', worldHtml(), d.world.main ? '✓' : '')}
-${sec('npc', '⑤ NPC', npcHtml(), d.npcs.length ? `${d.npcs.length} 个` : '')}
-${sec('routes', '⑥ 玩家与路线', routesHtml(), `${d.routes.length} 条`)}
-${sec('tone', '⑦ 基调与规则 · 自由模块', toneHtml(), d.tone ? '✓' : '')}
-${sec('greet', '⑧ 开场白', greetingHtml(), d.greetings.length ? `${d.greetings.length} 个` : '')}
-${sec('check', '⑨ 质检', checkHtml())}
-${sec('import', '⑩ 导入酒馆', importHtml(), d.imported ? '已导入' : '')}
-${sec('intro', '⑪ 简介', introHtml())}
-</div>`;
+    state.root.innerHTML = `<div class="cw">${state.page === 'home' ? homeHtml() : pageHtml(state.page)}</div>`;
     setBusy(state.busy);
     setStatus(state.lastStatus ?? `写卡工坊 v${VERSION}`);
 }
@@ -315,7 +379,7 @@ function setStatus(msg) {
 function setBusy(b) {
     state.busy = b;
     if (!state.root) return;
-    $(state.root).find('[data-act]').not('[data-act="stop"],[data-act="lockDice"]').toggleClass('disabled', b);
+    $(state.root).find('[data-act]').not('[data-act="stop"],[data-act="lockDice"],[data-act="go"]').toggleClass('disabled', b);
     $(state.root).find('.cw-stop').toggle(b);
 }
 
@@ -376,7 +440,7 @@ async function autoRun() {
         }
         if (s.autoBagu && hasBagu()) { await baguFix(); tick(); }
         state.checks = flow.localCheck(d);
-        state.open = new Set(['check', 'import']);
+        state.page = 'check';
     }, '一键出卡完成。看一下质检结果，没问题就导入。');
 }
 
@@ -478,6 +542,21 @@ function pushHistory() {
 }
 
 const ACTIONS = {
+    go: (el) => {
+        state.page = el.dataset.page || 'home';
+        if (!state.busy) state.lastStatus = '';
+        renderAll();
+        const box = state.root?.closest?.('.popup-content, .popup-body, dialog');
+        try { box?.scrollTo?.(0, 0); state.root?.scrollIntoView?.({ block: 'start' }); } catch { /* ignore */ }
+    },
+    ptab: (el) => { state.ptab = el.dataset.tab; renderAll(); },
+    resetStep: () => { settings().prompts[state.editStep] = ''; save(); renderAll(); },
+    resetRule: () => { settings().rules[state.editRule] = ''; save(); renderAll(); },
+    addStep: () => {
+        settings().customSteps.push({ id: `step${Date.now().toString(36)}`, name: '', stage: 'card', light: 'blue', position: 'after', keys: [], template: STEP_TEMPLATE, output: 'free' });
+        save(); renderAll();
+    },
+    delStep: (el) => { settings().customSteps.splice(Number(el.dataset.i), 1); save(); renderAll(); },
     stop: () => {
         state.abort = true;
         try { getCtx().stopGeneration?.(); } catch { /* ignore */ }
@@ -488,14 +567,14 @@ const ACTIONS = {
         if (!(await c.callGenericPopup('新建一张卡？当前草稿会放进历史草稿。', c.POPUP_TYPE.CONFIRM))) return;
         pushHistory();
         settings().draft = emptyDraft();
-        state.checks = null; state.bagu = null; state.open = new Set(['idea']);
+        state.checks = null; state.bagu = null; state.page = 'home';
         saveDraft(); renderAll();
     },
     auto: autoRun,
     idea: () => {
         const d = draft();
         if (!d.idea.trim()) return toastr.info('先写一句话脑洞', '写卡工坊');
-        return step(() => flow.idea(d), '选一个构想，标签已经自动勾好了。').then(() => { state.open.add('tags'); renderAll(); });
+        return step(() => flow.idea(d), '下面三个构想选一个，标签已经自动勾好了。');
     },
     inspire: () => step(() => flow.inspire(draft()), '点选或自己写答案，然后“用这些回答生成构想”。'),
     ideaFromInspire: () => {
@@ -518,7 +597,7 @@ const ACTIONS = {
     },
     pick: (el) => {
         flow.pickConcept(draft(), Number(el.dataset.i));
-        state.open.add('persona');
+        state.lastStatus = '选好了。点底部“下一步”继续，或者回目录点“一键出卡”。';
         saveDraft(); renderAll();
     },
     tag: (el) => {
@@ -614,6 +693,19 @@ function bindPopup(root) {
         setPath(draft(), this.dataset.bindList, this.value.split(/[,，、]/).map((x) => x.trim()).filter(Boolean));
         saveDraft();
     });
+    const S = () => settings();
+    $root.on('change', '.cw-step-sel', function () { state.editStep = this.value; renderAll(); });
+    $root.on('input', '.cw-step-ta', function () { S().prompts[state.editStep] = this.value.trim() === DEFAULT_PROMPTS[state.editStep].trim() ? '' : this.value; save(); });
+    $root.on('change', '.cw-rule-sel', function () { state.editRule = this.value; renderAll(); });
+    $root.on('input', '.cw-rule-ta', function () { S().rules[state.editRule] = this.value.trim() === DEFAULT_RULES[state.editRule].trim() ? '' : this.value; save(); });
+    $root.on('change', '.cw-dim-sel', function () { state.editDim = this.value; renderAll(); });
+    $root.on('input', '.cw-dim-ta', function () { S().customTags[state.editDim] = this.value.split('\n').map((x) => x.trim()).filter(Boolean); save(); });
+    $root.on('input change', '[data-step]', function () {
+        const st = S().customSteps[Number(this.dataset.step)];
+        if (!st) return;
+        st[this.dataset.key] = this.dataset.key === 'keys' ? this.value.split(/[,，、]/).map((x) => x.trim()).filter(Boolean) : this.value;
+        save();
+    });
     $root.on('change', '.cw-hist', function () {
         const i = Number(this.value);
         if (this.value === '') return;
@@ -625,11 +717,6 @@ function bindPopup(root) {
         state.checks = null; state.bagu = null;
         saveDraft(); renderAll();
     });
-    root.addEventListener('toggle', (ev) => {
-        const el = ev.target;
-        if (!el.classList?.contains('cw-sec')) return;
-        if (el.open) state.open.add(el.dataset.sec); else state.open.delete(el.dataset.sec);
-    }, true);
 }
 
 async function openWorkshop() {
@@ -653,8 +740,6 @@ function settingsHtml() {
     const presets = listPresets();
     const opt = (v, label, cur) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(label)}</option>`;
     const presetSel = (key) => `<select class="text_pole" data-set="${key}">${opt('', '不用预设', s[key])}${presets.map((p) => opt(p, p, s[key])).join('')}</select>`;
-    const stepIds = Object.keys(DEFAULT_PROMPTS);
-    const L = lib();
     return `
 <div class="cw-settings">
   <div class="inline-drawer">
@@ -689,31 +774,8 @@ function settingsHtml() {
       <label>预设参考 <input class="text_pole" data-set="presetNote" value="${esc(s.presetNote)}" placeholder="空着就写开场白预设的名字"></label>
       <label>其他说明 <input class="text_pole" data-set="introNotes" value="${esc(s.introNotes)}"></label>
 
-      <h4>步骤提示词</h4>
-      <select class="text_pole cw-step-sel">${stepIds.map((id) => opt(id, `${STEP_INFO[id]?.name ?? id}${s.prompts[id]?.trim() ? '（已改）' : ''}`, state.editStep)).join('')}</select>
-      <textarea class="text_pole cw-step-ta" rows="12"></textarea>
-      <div class="menu_button cw-step-reset">恢复这一步的默认提示词</div>
-      <details><summary>可用变量</summary><div class="cw-small">${Object.entries(TEMPLATE_VARS).map(([k, v]) => `<code>{{${esc(k)}}}</code> ${esc(v)}`).join('<br>')}</div></details>
-
-      <h4>规则库 <small class="cw-dim">多个步骤共用，改一处全部生效</small></h4>
-      <select class="text_pole cw-rule-sel">${Object.keys(DEFAULT_RULES).map((k) => opt(k, `${k}${s.rules[k]?.trim() ? '（已改）' : ''}`, state.editRule)).join('')}</select>
-      <textarea class="text_pole cw-rule-ta" rows="10"></textarea>
-      <div class="menu_button cw-rule-reset">恢复这条规则的默认内容</div>
-
-      <h4>我的标签 <small class="cw-dim">每行一个：名称|触发词,触发词</small></h4>
-      <select class="text_pole cw-dim-sel">${L.map((d) => opt(d.key, d.name, state.editDim)).join('')}</select>
-      <textarea class="text_pole cw-dim-ta" rows="5" placeholder="蒸汽朋克|蒸汽,齿轮城"></textarea>
-
-      <h4>我的步骤 <small class="cw-dim">自己加的步骤会出现在“基调与规则”里，产出写成自由模块</small></h4>
-      <div class="cw-steps">${(s.customSteps ?? []).map((st, i) => `<div class="cw-card">
-        <input class="text_pole" data-step="${i}" data-key="name" value="${esc(st.name)}" placeholder="步骤名（也是模块名）">
-        <div class="cw-row"><select class="text_pole" data-step="${i}" data-key="stage">${opt('card', '用写卡预设', st.stage)}${opt('greeting', '用开场白预设', st.stage)}</select>
-        <select class="text_pole" data-step="${i}" data-key="light">${opt('blue', '蓝灯', st.light)}${opt('green', '绿灯', st.light)}</select>
-        <select class="text_pole" data-step="${i}" data-key="position">${opt('after', '角色后', st.position)}${opt('before', '角色前', st.position)}</select></div>
-        <input class="text_pole" data-step="${i}" data-key="keys" value="${esc((st.keys ?? []).join('，'))}" placeholder="绿灯关键词">
-        <textarea class="text_pole" rows="6" data-step="${i}" data-key="template" placeholder="提示词，可以用 {{concept}} {{overviews}} {{rules.通用}} 等变量">${esc(st.template)}</textarea>
-        <div class="menu_button cw-step-del" data-i="${i}">删除这个步骤</div></div>`).join('')}</div>
-      <div class="menu_button cw-step-add">加一个步骤</div>
+      <h4>提示词</h4>
+      <small class="cw-dim">每一步的提示词、规则库、我的标签、我的步骤，都在写卡工坊里：目录 → 提示词。</small>
     </div>
   </div>
 </div>`;
@@ -722,12 +784,6 @@ function settingsHtml() {
 function bindSettings() {
     const s = settings();
     const $p = $('.cw-settings');
-    const fillEditors = () => {
-        $p.find('.cw-step-ta').val(s.prompts[state.editStep]?.trim() ? s.prompts[state.editStep] : DEFAULT_PROMPTS[state.editStep]);
-        $p.find('.cw-rule-ta').val(s.rules[state.editRule]?.trim() ? s.rules[state.editRule] : DEFAULT_RULES[state.editRule]);
-        $p.find('.cw-dim-ta').val((s.customTags[state.editDim] ?? []).join('\n'));
-    };
-    fillEditors();
     $p.on('click', '.cw-open', openWorkshop);
     // 预设和连接配置文件可能在扩展加载后才读完，展开设置时刷新一次
     $p.on('click', '.inline-drawer-toggle', () => {
@@ -748,35 +804,6 @@ function bindSettings() {
         setPath(s, this.dataset.set, v);
         save();
     });
-    $p.on('change', '.cw-step-sel', function () { state.editStep = this.value; fillEditors(); });
-    $p.on('input', '.cw-step-ta', function () {
-        s.prompts[state.editStep] = this.value.trim() === DEFAULT_PROMPTS[state.editStep].trim() ? '' : this.value;
-        save();
-    });
-    $p.on('click', '.cw-step-reset', () => { s.prompts[state.editStep] = ''; fillEditors(); save(); });
-    $p.on('change', '.cw-rule-sel', function () { state.editRule = this.value; fillEditors(); });
-    $p.on('input', '.cw-rule-ta', function () {
-        s.rules[state.editRule] = this.value.trim() === DEFAULT_RULES[state.editRule].trim() ? '' : this.value;
-        save();
-    });
-    $p.on('click', '.cw-rule-reset', () => { s.rules[state.editRule] = ''; fillEditors(); save(); });
-    $p.on('change', '.cw-dim-sel', function () { state.editDim = this.value; fillEditors(); });
-    $p.on('input', '.cw-dim-ta', function () {
-        s.customTags[state.editDim] = this.value.split('\n').map((x) => x.trim()).filter(Boolean);
-        save();
-    });
-    $p.on('input change', '[data-step]', function () {
-        const st = s.customSteps[Number(this.dataset.step)];
-        if (!st) return;
-        st[this.dataset.key] = this.dataset.key === 'keys' ? this.value.split(/[,，、]/).map((x) => x.trim()).filter(Boolean) : this.value;
-        save();
-    });
-    const rerender = () => { $p.replaceWith(settingsHtml()); bindSettings(); $('.cw-settings .inline-drawer-content').show(); };
-    $p.on('click', '.cw-step-add', () => {
-        s.customSteps.push({ id: `step${Date.now().toString(36)}`, name: '', stage: 'card', light: 'blue', position: 'after', keys: [], template: '【任务】为这张卡写……\n\n【构想】\n{{concept}}\n【主要角色概要】\n{{overviews}}\n\n【写法规则】\n{{rules.通用}}', output: 'free' });
-        save(); rerender();
-    });
-    $p.on('click', '.cw-step-del', function () { s.customSteps.splice(Number(this.dataset.i), 1); save(); rerender(); });
 }
 
 jQuery(async () => {

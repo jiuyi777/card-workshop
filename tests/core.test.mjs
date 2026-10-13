@@ -26,14 +26,20 @@ await check('标签：一句话自动识别，单选维度只留一个', () => {
 
 await check('标签：自定义标签生效，单选替换，AI 返回的未知标签被丢掉', () => {
     assert.ok(matchTags('齿轮城里的故事', lib).some((h) => h.name === '蒸汽朋克'));
-    let sel = toggleTag([], lib, 'cp', 'BG');
+    let sel = toggleTag([], lib, 'count', '1v1');
+    sel = toggleTag(sel, lib, 'count', 'NP');
+    assert.deepEqual(sel, [{ dim: 'count', name: 'NP' }], '人数是单选');
+    sel = toggleTag(sel, lib, 'cp', 'BG');
+    sel = toggleTag(sel, lib, 'cp', 'GB');
+    assert.equal(sel.filter((t) => t.dim === 'cp').length, 2, '性向可以多选，有 GB');
+    sel = sel.filter((t) => !(t.dim === 'cp' && t.name === 'BG'));
     sel = toggleTag(sel, lib, 'cp', 'BL');
-    assert.deepEqual(sel, [{ dim: 'cp', name: 'BL' }]);
+    sel = toggleTag(sel, lib, 'cp', 'GB', false);
     sel = toggleTag(sel, lib, 'era', '现言');
     sel = toggleTag(sel, lib, 'era', '校园');
-    assert.equal(sel.length, 3);
+    assert.equal(sel.length, 4);
     assert.deepEqual(sanitizeTags(['青梅竹马', '不存在的标签', { dim: 'cp', name: 'GL' }], lib), [{ dim: 'relation', name: '青梅竹马' }, { dim: 'cp', name: 'GL' }]);
-    assert.match(tagsText(sel, lib), /性向：BL.*时代与题材：现言、校园/);
+    assert.match(tagsText(sel, lib), /性向：BL.*人数：NP.*时代与题材：现言、校园/);
     assert.ok(libraryText(lib).includes('角色原型：霸总'));
     assert.ok(!libraryText(lib).includes('世界观复杂度'));
 });
