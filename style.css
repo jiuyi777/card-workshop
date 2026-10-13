@@ -105,3 +105,17 @@
 .cw-fb { font-size: 0.92em; }
 .cw-warn { font-size: 0.88em; color: #d08a2c; padding: 4px 8px; border-radius: 6px; background: rgba(220, 150, 60, 0.12); }
 .cw-presetpick { display: flex; flex-direction: column; gap: 3px; }
+
+/* 开场白的梗 */
+.cw-hook { display: flex; align-items: flex-start; gap: 6px; padding: 4px 6px; border-radius: 6px; border-left: 3px solid transparent; background: color-mix(in srgb, var(--SmartThemeBodyColor) 4%, transparent); }
+.cw-hook.on { border-left-color: var(--SmartThemeQuoteColor); background: color-mix(in srgb, var(--SmartThemeQuoteColor) 12%, transparent); }
+.cw-hook.used { opacity: 0.7; }
+.cw-hook input[type="checkbox"] { margin-top: 8px; flex: 0 0 auto; }
+.cw-hooktext { flex: 1 1 auto; min-height: 2.6em; margin: 0; field-sizing: content; font-size: 0.93em; line-height: 1.5; }
+.cw-x { cursor: pointer; opacity: 0.5; padding: 4px 6px; font-size: 1.1em; }
+.cw-x:hover { opacity: 1; }
+.cw-usedtag { margin: -2px 0 2px 28px; }
+
+/* 选卡 */
+.cw-cardsel { min-height: 10em; }
+.cw-cardsel option { padding: 4px 6px; }

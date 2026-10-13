@@ -3,7 +3,7 @@
 import { DEFAULT_PROMPTS, DEFAULT_RULES, PERSONA_TEMPLATE, SYSTEM_CARD, SYSTEM_PROSE, STEP_INFO, fill, ruleVars } from './prompts.js';
 import { parseJSON, splitBlocks, blockOf, extractTagged, clip, stripWords, wordList, findWords } from './parse.js';
 import { matchTags, sanitizeTags, toggleTag, tagsText, tagValue, libraryText, findTag, rollDice, PLATFORM_STYLE, dimOf } from './tags.js';
-import { conceptText, answersText, overviewsText, routesText, composeIntro, parseTitles, orderedGreetings } from './assemble.js';
+import { conceptText, answersText, overviewsText, routesText, composeIntro, parseTitles, orderedGreetings, DEFAULT_INTRO_STYLE, cardToDraft, existingSummary } from './assemble.js';
 import { scanCard, predictOverlap, crossCompare } from './checks.js';
 
 const arr = (x) => (Array.isArray(x) ? x : x == null || x === '' ? [] : [x]);
@@ -47,7 +47,7 @@ export function makeFlow(deps) {
         return {
             idea: d.idea,
             tags: tagsText(d.tags, L()) || '（未选）',
-            concept: conceptText(concept(d)),
+            concept: concept(d) ? conceptText(concept(d)) : (d.existing ? existingSummary(d) : conceptText(null)),
             platform: platform(d),
             overviews: overviewsText(d),
             personas: clip((d.personas ?? []).map((p) => p.text).filter(Boolean).join('\n\n'), 6000),
@@ -101,7 +101,71 @@ export function makeFlow(deps) {
             greet: { get: () => d.greetings.filter((g) => g.route === name).map((g) => g.text), set: (v) => { d.greetings = [...d.greetings.filter((g) => g.route !== name), ...v.map((text) => ({ route: name, text }))]; } },
             free: { get: () => fr()?.content ?? '', set: (v) => { const f = fr(); if (f) f.content = v; } },
             intro: { get: () => d.intro, set: (v) => { d.intro = v; } },
+            exist: existSlot(d, name),
+            route: { get: () => d.routes.find((r) => r.name === name)?.info ?? '', set: (v) => { const r = d.routes.find((x) => x.name === name); if (r) r.info = v; } },
         }[kind];
+    }
+
+    /** 原卡里的一段：exist:field:description / exist:entry:12 / exist:greet:0 */
+    function existSlot(d, name) {
+        const ex = d.existing;
+        if (!ex) return undefined;
+        const [type, id] = name.split(':');
+        if (type === 'field') return { get: () => ex.fields[id] ?? '', set: (v) => { ex.fields[id] = v; } };
+        if (type === 'entry') { const e = () => ex.entries.find((x) => String(x.uid) === id); return { get: () => e()?.content ?? '', set: (v) => { if (e()) e().content = v; } }; }
+        if (type === 'greet') return { get: () => ex.greetings[Number(id)] ?? '', set: (v) => { ex.greetings[Number(id)] = v; } };
+        return undefined;
+    }
+
+    /** 能“按意见改”的块：值是一段文字 */
+    function textSlot(d, key) {
+        const [kind, ...rest] = key.split(':');
+        const name = rest.join(':');
+        const labels = { persona: `人设·${name}`, world: '世界观', tone: '基调与规则', free: `模块·${name}`, route: `路线·${name}`, exist: name.startsWith('field:') ? { description: '角色描述', personality: '性格', scenario: '场景', mes_example: '对话示例' }[name.slice(6)] ?? name : name.startsWith('greet:') ? `开场白 ${Number(name.slice(6)) + 1}` : (d.existing?.entries.find((e) => `entry:${e.uid}` === name)?.comment ?? '条目') };
+        if (kind === 'persona') { const p = d.personas.find((x) => x.name === name); return p && { label: labels.persona, get: () => p.text, set: (v) => { p.text = v; } }; }
+        if (kind === 'world') return { label: labels.world, get: () => d.world.main, set: (v) => { d.world.main = v; } };
+        if (kind === 'tone') return { label: labels.tone, get: () => d.tone, set: (v) => { d.tone = v; } };
+        const slot = slotOf(d, key);
+        return slot && labels[kind] && { label: labels[kind], ...slot };
+    }
+
+    /** 按意见修改一段（已有的卡用，不从头重写） */
+    async function revise(d, key) {
+        const slot = textSlot(d, key);
+        if (!slot) throw new Error('这一块不能按意见改');
+        const fb = feedbackOf(d, key);
+        if (!fb) throw new Error('先在“哪里不满意”里写意见');
+        const text = slot.get();
+        if (!str(text)) throw new Error('这一块是空的，没法改');
+        const out = await run('revise', d, { label: slot.label, fb, text });
+        remember(d, key.startsWith('persona:') ? key : key, key.startsWith('persona:') ? { overview: d.personas.find((x) => x.name === key.slice(8))?.overview ?? '', text } : text);
+        slot.set(out.trim());
+        d.feedback[key] = '';
+        return d;
+    }
+
+    /** 给已有的卡想新路线（只出点子，作者点“加上”才算数） */
+    async function suggestRoutes(d, n = 3) {
+        const j = parseJSON(await run('newRoutes', d, { n }, { json: true }));
+        d.routeIdeas = arr(j.routes).map((r) => ({ name: str(r?.name), user: str(r?.user), period: str(r?.period), why: str(r?.why) })).filter((r) => r.name);
+        return d;
+    }
+
+    function addRouteIdea(d, i) {
+        const r = d.routeIdeas?.[i];
+        if (!r) return d;
+        let name = r.name;
+        for (let k = 2; d.routes.some((x) => x.name === name); k++) name = `${r.name}${k}`;
+        d.routes.push({ name, user: r.user, period: r.period, info: '' });
+        d.routeIdeas.splice(i, 1);
+        return d;
+    }
+
+    /** 读一张已有的卡进草稿 */
+    function loadCard(card, worldData, worldName) {
+        const d = cardToDraft(card, worldData, worldName);
+        d.tags = sanitizeTags(d.tags.map((t) => t.name), L());
+        return d;
     }
 
     /** 换回上一版：当前版本放回历史最前面，可以一直点着轮换 */
@@ -168,6 +232,19 @@ export function makeFlow(deps) {
         return d;
     }
 
+    /** 有脑洞时：针对脑洞问 3 个问题，答案在生成构想时一起带上 */
+    async function ideaQA(d) {
+        if (!str(d.idea)) throw new Error('先写一句话脑洞');
+        const j = parseJSON(await run('ideaQA', d, {}, { json: true }));
+        d.ideaQA = arr(j.questions).slice(0, 4).map((q) => ({ q: str(q.q), options: arr(q.options).map(str).filter(Boolean).slice(0, 4), answer: '' }));
+        return d;
+    }
+
+    const ideaAnswers = (d) => {
+        const list = (d.ideaQA ?? []).filter((q) => str(q.answer));
+        return list.length ? `【作者补充】\n${list.map((q) => `${q.q}\n→ ${str(q.answer)}`).join('\n')}` : '';
+    };
+
     function ideaFromInspire(d) {
         const dice = Object.values(d.dice ?? {}).join('、');
         const ans = (d.inspire ?? []).filter((q) => q.answer?.trim()).map((q) => q.answer.trim()).join('；');
@@ -197,6 +274,7 @@ export function makeFlow(deps) {
         const j = parseJSON(await run('idea', d, {
             matched: hits.map((h) => h.name).join('、') || '（无）',
             tagLibrary: libraryText(lib),
+            ideaAnswers: ideaAnswers(d),
         }, { json: true, key: 'idea', prev: (d.concepts ?? []).map((c) => c.title).join('\n') }));
         remember(d, 'idea', { concepts: d.concepts, pick: d.pick });
         d.concepts = arr(j.concepts).slice(0, 3).map(normalizeConcept);
@@ -337,16 +415,23 @@ export function makeFlow(deps) {
     // ───── 5. 路线 ─────
     async function routes(d) {
         if (!d.routes?.length) d.routes = [{ name: '主线', user: '', period: '', info: '' }];
-        const raw = await run('routes', d, {}, { key: 'routes', prev: d.routes.map((r) => r.info).join('\n') });
+        // 有空着的路线就只写空着的（给已有的卡加路线时不动原来的），全写好了就全部重写
+        const empty = d.routes.filter((r) => !str(r.info));
+        const targets = empty.length ? empty : d.routes;
+        const others = d.routes.filter((r) => !targets.includes(r) && str(r.info));
+        const raw = await run('routes', d, {
+            routes: targets.map((r, i) => `${i + 1}. ${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}`).join('\n'),
+            otherRoutes: others.length ? `【已有的路线】（不用重写，新路线要和它们区分开）\n${others.map((r) => `${r.name}：${clip(r.info, 300)}`).join('\n')}` : '',
+        }, { key: 'routes', prev: targets.map((r) => r.info).join('\n') });
         remember(d, 'routes', d.routes.map((r) => r.info));
         const parsed = splitBlocks(raw);
         const blocks = parsed.blocks.filter((b) => b.body);
-        if (!blocks.length && parsed.lead) blocks.push({ name: d.routes[0].name, body: parsed.lead });
+        if (!blocks.length && parsed.lead) blocks.push({ name: targets[0].name, body: parsed.lead });
         const used = new Set();
         for (const b of blocks) {
-            let r = d.routes.find((x) => !used.has(x) && (x.name === b.name || (b.name && (x.name.includes(b.name) || b.name.includes(x.name)))));
-            r ??= d.routes.find((x) => !used.has(x));
-            if (!r) { r = { name: b.name || `路线${d.routes.length + 1}`, user: '', period: '', info: '' }; d.routes.push(r); }
+            let r = targets.find((x) => !used.has(x) && (x.name === b.name || (b.name && (x.name.includes(b.name) || b.name.includes(x.name)))));
+            r ??= targets.find((x) => !used.has(x));
+            if (!r) continue; // AI 多写的路线不要，路线只由作者加
             used.add(r);
             r.info = b.body;
         }
@@ -373,15 +458,26 @@ export function makeFlow(deps) {
     /** 用户自己加的步骤：模板里的变量同样可用，产出写进一个自由模块 */
     async function custom(d, step) {
         check();
-        progress(`${step.name}…`);
-        const user = fill(step.template, { ...baseVars(d), name: step.name });
-        const out = strip(await deps.llm({ system: withBan(step.stage === 'greeting' ? SYSTEM_PROSE : SYSTEM_CARD, d), user, stage: step.stage || 'card', temperature: 0.8 }));
+        const name = str(step.name) || '我的步骤';
+        progress(`${name}…`);
+        const key = `free:${name}`;
+        let f = d.free.find((x) => x.fromStep === step.id);
+        let user = fill(step.template, { ...baseVars(d), name });
+        const fb = feedbackOf(d, key);
+        if (fb) {
+            user += `\n\n【作者对上一版的修改意见，必须优先满足】\n${fb}`;
+            if (str(f?.content)) user += `\n【上一版】\n${clip(f.content, 3000)}`;
+        }
+        const st = step.stage || 'card';
+        const out = strip(await deps.llm({ system: withBan(st === 'greeting' ? SYSTEM_PROSE : SYSTEM_CARD, d), user, stage: st, temperature: 0.8 }));
         check();
+        if (fb) d.feedback[key] = '';
         d.custom ??= {};
         d.custom[step.id] = out;
         if (step.output !== 'none') {
-            let f = d.free.find((x) => x.fromStep === step.id);
-            if (!f) { f = { name: step.name, desc: '', content: '', light: step.light || 'blue', keys: step.keys ?? [], position: step.position || 'after', fromStep: step.id }; d.free.push(f); }
+            if (!f) { f = { name, desc: '', content: '', light: step.light || 'blue', keys: step.keys ?? [], position: step.position || 'after', fromStep: step.id }; d.free.push(f); }
+            remember(d, key, f.content);
+            f.name = name;
             f.content = out;
         }
         return d;
@@ -404,6 +500,47 @@ export function makeFlow(deps) {
         d.greetings = (d.greetings ?? []).filter((g) => g.route !== r.name);
         d.greetings.push(...texts.map((text) => ({ route: r.name, text })));
         return d;
+    }
+
+    // 先想梗，再扩写
+    const routeVars = (d, r) => ({
+        route: r.name,
+        routeInfo: r.info || `${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}`,
+        length: S().greetingLength || '600–900',
+        personas: clip((d.personas ?? []).map((p) => p.text).join('\n\n'), 5000),
+    });
+
+    async function hooks(d, ri, n = 5) {
+        const r = d.routes[ri] ?? { name: '主线', info: '' };
+        d.hooks ??= {};
+        const list = (d.hooks[r.name] ??= []);
+        const j = parseJSON(await run('hooks', d, {
+            ...routeVars(d, r),
+            n,
+            existing: list.map((h) => `- ${h.text}`).join('\n') || '（无）',
+        }, { json: true, key: `hooks:${r.name}` }));
+        const fresh = arr(j.hooks).map(str).filter(Boolean).map((t) => strip(t));
+        // 没勾选、没扩写过的旧梗换掉，勾了的和自己写的留着
+        d.hooks[r.name] = [...list.filter((h) => h.on || h.mine || h.used), ...fresh.map((text) => ({ text, on: false }))];
+        return d;
+    }
+
+    async function expand(d, ri) {
+        const r = d.routes[ri] ?? { name: '主线', info: '' };
+        const picked = (d.hooks?.[r.name] ?? []).filter((h) => h.on && str(h.text));
+        if (!picked.length) throw new Error('先勾选要扩写的梗，或者自己写一个');
+        const raw = await run('expand', d, {
+            ...routeVars(d, r),
+            hooks: picked.map((h, i) => `${i + 1}. ${h.text}`).join('\n'),
+        }, { key: `greet:${r.name}` });
+        const parsed = splitBlocks(raw);
+        let texts = parsed.blocks.filter((b) => b.type === '开场白' && b.body).map((b) => b.body);
+        if (!texts.length && parsed.lead) texts = [parsed.lead];
+        remember(d, `greet:${r.name}`, (d.greetings ?? []).filter((g) => g.route === r.name).map((g) => g.text));
+        d.greetings ??= [];
+        d.greetings.push(...texts.map((text) => ({ route: r.name, text })));
+        for (const h of picked) { h.on = false; h.used = true; }
+        return texts.length;
     }
 
     // ───── 8. 质检 ─────
@@ -478,6 +615,7 @@ export function makeFlow(deps) {
         const slots = [];
         const slot = (label, kind, get, set) => { if (str(get())) slots.push({ label, kind, get, set }); };
         slot('基调与规则', '世界书条目', () => d.tone, (v) => { d.tone = v; });
+        if (slots.length) slots[slots.length - 1].rules = true; // 规则清单本来就列着禁用词，八股清理跳过
         slot('世界观', '世界书条目', () => d.world.main, (v) => { d.world.main = v; });
         d.world.extra.forEach((e) => slot(`世界观·${e.name}`, '世界书条目', () => e.content, (v) => { e.content = v; }));
         d.personas.forEach((p) => {
@@ -488,6 +626,13 @@ export function makeFlow(deps) {
         d.routes.forEach((r) => slot(`路线·${r.name}`, '世界书条目', () => r.info, (v) => { r.info = v; }));
         d.free.forEach((f) => slot(`模块·${f.name}`, '世界书条目', () => f.content, (v) => { f.content = v; }));
         (d.greetings ?? []).forEach((g, i) => slot(`开场白 ${i + 1}`, '开场白', () => g.text, (v) => { g.text = v; }));
+        if (d.existing) {
+            for (const [k, label] of [['description', '角色描述'], ['personality', '性格'], ['scenario', '场景']]) {
+                slot(`原卡·${label}`, '角色卡', () => d.existing.fields[k], (v) => { d.existing.fields[k] = v; });
+            }
+            d.existing.entries.forEach((e) => slot(`原卡·${e.comment}`, '世界书条目', () => e.content, (v) => { e.content = v; }));
+            d.existing.greetings.forEach((g, i) => slot(`原卡·开场白 ${i + 1}`, '开场白', () => d.existing.greetings[i], (v) => { d.existing.greetings[i] = v; }));
+        }
         return slots;
     }
 
@@ -508,6 +653,12 @@ export function makeFlow(deps) {
         return d;
     }
 
+    /** 当前简介风格：0 = 默认，其余是设置里存的 */
+    const introStyle = (s = S()) => {
+        const i = Number(s.introStyle ?? 0);
+        return i > 0 ? s.introStyles?.[i - 1]?.tpl : DEFAULT_INTRO_STYLE;
+    };
+
     function composeIntroFor(d, s = S()) {
         const it = d.intro ?? {};
         return composeIntro(it.parts ?? {}, {
@@ -518,12 +669,12 @@ export function makeFlow(deps) {
             presetNote: s.presetNote || s.presetGreeting || '',
             notes: s.introNotes,
             charName: d.personas?.[0]?.name ?? '',
-        });
+        }, introStyle(s));
     }
 
     return {
         banned, strip, restore, remember, slotOf,
-        inspire, ideaFromInspire, localTags, idea, pickConcept, qa, persona, world, npc, routes, tone, free, custom,
+        inspire, ideaFromInspire, ideaQA, hooks, expand, revise, textSlot, suggestRoutes, addRouteIdea, loadCard, localTags, idea, pickConcept, qa, persona, world, npc, routes, tone, free, custom,
         greetings, predict, destale, localCheck, textSlots, intro, composeIntroFor, baseVars,
     };
 }

@@ -95,3 +95,8 @@ ${JSON.stringify(batch.map((t) => ({ id: t.id, 句子: t.text, 八股: t.hits.ma
     }
     return { text: engine.applyEdits(text, targets, replacements), changed: replacements.size, failed };
 }
+
+/** 像规则/提示词的条目（本身就列着禁用词），八股清理跳过 */
+export function isInstructions(text) {
+    try { return !!engine?.looksLikeInstructions?.(text); } catch { return false; }
+}

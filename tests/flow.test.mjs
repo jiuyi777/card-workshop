@@ -239,5 +239,145 @@ await check('截断：没有收尾标签就自动续写一次；还不完整就�
     assert.ok(!d.truncated.world, '换回上一版后去掉截断提醒');
 });
 
+await check('脑洞问答：有脑洞也能先问问题，回答带进构想', async () => {
+    const e = { ...emptyDraft(), idea: '铁血权相与废柴义子' };
+    replies.push(JSON.stringify({ questions: [{ q: '义子真的废吗？', options: ['装的', '真废', '半废'] }] }));
+    await flow.ideaQA(e);
+    assert.ok(sent.at(-1).user.includes('铁血权相与废柴义子') && sent.at(-1).user.includes('脑洞里已经写明的不要再问'));
+    e.ideaQA[0].answer = '装的';
+    replies.push(ideaReply);
+    await flow.idea(e);
+    assert.ok(sent.at(-1).user.includes('【作者补充】\n义子真的废吗？\n→ 装的'));
+});
+
+await check('开场白：先想梗，勾选/自己写，再扩写，扩写的加在后面不覆盖', async () => {
+    const before = d.greetings.filter((g) => g.route === '第一个春天').length;
+    replies.push(JSON.stringify({ hooks: ['庙门口，他极其安静地等着', '雨夜桥下', '春祭当天', '夏天他出现了', '他认出了你'] }));
+    await flow.hooks(d, 0);
+    assert.equal(sent.at(-1).stage, 'greeting', '想梗用开场白预设');
+    assert.equal(d.hooks['第一个春天'].length, 5);
+    assert.equal(d.hooks['第一个春天'][0].text, '庙门口，他安静地等着', '梗也删程度副词');
+    d.hooks['第一个春天'][1].on = true;
+    d.hooks['第一个春天'].push({ text: '我自己写的梗', on: true, mine: true });
+    replies.push(JSON.stringify({ hooks: ['新梗1', '新梗2', '新梗3', '新梗4', '新梗5'] }));
+    await flow.hooks(d, 0);
+    const hs = d.hooks['第一个春天'];
+    assert.equal(hs.length, 7, '勾了的和自己写的留着，没勾的换掉');
+    assert.ok(sent.at(-1).user.includes('雨夜桥下'), '已有的梗告诉 AI 别重复');
+    replies.push('<<<开场白>>>\n雨夜桥下的正文\n<<<开场白>>>\n自己写的梗的正文');
+    const n = await flow.expand(d, 0);
+    assert.equal(n, 2);
+    assert.ok(sent.at(-1).user.includes('1. 雨夜桥下\n2. 我自己写的梗'));
+    const after = d.greetings.filter((g) => g.route === '第一个春天');
+    assert.equal(after.length, before + 2);
+    assert.ok(hs.filter((h) => h.used).length === 2 && !hs.some((h) => h.on));
+    await assert.rejects(() => flow.expand(d, 0), /先勾选/);
+});
+
+await check('我的步骤：重写带意见、存上一版', async () => {
+    const st = { id: 'c1', name: '信物', template: '写信物' };
+    d.feedback['free:信物'] = '再神秘一点';
+    replies.push('更神秘的信物');
+    await flow.custom(d, st);
+    assert.ok(sent.at(-1).user.includes('再神秘一点') && sent.at(-1).user.includes('【上一版】'));
+    assert.equal(d.free.find((f) => f.fromStep === 'c1').content, '更神秘的信物');
+    flow.restore(d, 'free:信物');
+    assert.equal(d.free.find((f) => f.fromStep === 'c1').content, '改过的信物');
+});
+
+await check('简介风格：换风格只重排，不调 API；条件块和过滤器', async () => {
+    const { renderIntro, DEFAULT_INTRO_STYLE } = await import('../src/assemble.js');
+    assert.equal(renderIntro('{{#路线}}## 路线\n{{路线|引用}}{{/路线}}标题：{{标题}}', { 路线: '', 标题: 'T' }), '标题：T');
+    assert.equal(renderIntro('{{#路线}}{{路线|引用}}{{/路线}}', { 路线: 'a\nb' }), '> a\n> b');
+    assert.equal(renderIntro('{{#a}}A{{#b}}B{{/b}}{{/a}}', { a: '1', b: '' }), 'A');
+    const n0 = sent.length;
+    settings.introStyles = [{ name: '极简', tpl: '{{标题}}\n\n{{简介}}' }];
+    settings.introStyle = 1;
+    const text = flow.composeIntroFor(d);
+    assert.equal(sent.length, n0);
+    assert.ok(text.startsWith(d.intro.titles[d.intro.pick]) && !text.includes('关于TA'), text);
+    settings.introStyle = 0;
+    assert.ok(flow.composeIntroFor(d).includes('## 关于TA'));
+    assert.ok(DEFAULT_INTRO_STYLE.includes('{{#内心想法}}'));
+});
+
+await check('八股清理跳过基调与规则（规则清单本身列着禁用词）', () => {
+    const slots = flow.textSlots(d);
+    assert.equal(slots.find((x) => x.label === '基调与规则').rules, true);
+    assert.ok(!slots.find((x) => x.label === '世界观').rules);
+});
+
+await check('改已有的卡：读进来，按意见改，想新路线，只写新路线，写回时合并', async () => {
+    const { cardUpdate, mergeWorld } = await import('../src/assemble.js');
+    const card = { avatar: '黎曙.png', data: { name: '黎曙', description: '他是扒手团的孤儿。', personality: '冷', scenario: '', first_mes: '原开场', alternate_greetings: ['原开场2'], tags: ['BG', '扒手/盗贼', '奇怪标签'] } };
+    const world = { entries: {
+        0: { uid: 0, comment: '扒手团', key: ['扒手团'], content: '领头叫老鬼', constant: false, disable: false },
+        1: { uid: 1, comment: '路线·孤儿时期', key: [], content: '<玩家信息>A</玩家信息>', constant: true, disable: false },
+    } };
+    const e = flow.loadCard(card, world, '黎曙');
+    assert.equal(e.personas[0].fromDescription, true, '没有人设条目时，角色描述就是人设');
+    assert.equal(e.personas[0].text, '他是扒手团的孤儿。');
+    assert.deepEqual(e.tags.map((t) => t.name), ['BG', '扒手/盗贼'], '只认标签库里有的');
+    assert.deepEqual(e.routes.map((r) => r.name), ['孤儿时期']);
+    assert.equal(e.existing.entries.length, 1);
+    assert.deepEqual(e.existing.greetings, ['原开场', '原开场2']);
+
+    // 按意见改原卡的条目
+    e.feedback['exist:entry:0'] = '领头改成女的';
+    replies.push('领头叫鬼姐');
+    await flow.revise(e, 'exist:entry:0');
+    assert.ok(sent.at(-1).user.includes('领头改成女的') && sent.at(-1).user.includes('领头叫老鬼') && sent.at(-1).user.includes('卡名：黎曙'), '原文、意见、原卡摘要都发了');
+    assert.equal(e.existing.entries[0].content, '领头叫鬼姐');
+    flow.restore(e, 'exist:entry:0');
+    assert.equal(e.existing.entries[0].content, '领头叫老鬼');
+    await assert.rejects(() => flow.revise(e, 'exist:entry:0'), /先在/);
+
+    // 想新路线，加一条，只写新的那条
+    replies.push(JSON.stringify({ routes: [{ name: '重逢', user: '仇人', period: '十年后', why: '他欠你一条命' }, { name: '孤儿时期', user: 'x', period: 'y', why: 'z' }] }));
+    await flow.suggestRoutes(e);
+    assert.ok(sent.at(-1).user.includes('孤儿时期'), '告诉 AI 已有路线');
+    flow.addRouteIdea(e, 1);
+    assert.equal(e.routes[1].name, '孤儿时期2', '重名自动加序号');
+    flow.addRouteIdea(e, 0);
+    replies.push('<<<路线:孤儿时期2>>>\n<玩家信息>B</玩家信息>\n<<<路线:重逢>>>\n<玩家信息>C</玩家信息>');
+    await flow.routes(e);
+    assert.ok(sent.at(-1).user.includes('【已有的路线】') && !/\d\. 孤儿时期｜/.test(sent.at(-1).user), '只写新路线，原路线作参考');
+    assert.equal(e.routes[0].info, '<玩家信息>A</玩家信息>', '原路线没动');
+    assert.ok(e.routes[2].info.includes('C'));
+
+    // 写回：原条目按 uid 改，写卡工坊的条目按名字找，没有就新建；新路线默认关
+    e.existing.entries[0].content = '改过的扒手团';
+    e.greetings = [{ route: '重逢', text: '新开场' }];
+    const merged = mergeWorld(world, e);
+    const by = Object.fromEntries(Object.values(merged.entries).map((x) => [x.comment, x]));
+    assert.equal(by['扒手团'].content, '改过的扒手团');
+    assert.equal(by['路线·孤儿时期'].disable, false);
+    assert.equal(by['路线·重逢'].disable, true, '已经有开着的路线，新路线默认关');
+    assert.ok(!by['人设·黎曙'], '人设在角色描述里，不进世界书');
+    assert.equal(Object.keys(merged.entries).length, 4);
+    assert.equal(world.entries[0].content, '领头叫老鬼', '不改传进来的原数据');
+    e.personas[0].text = '改过的人设';
+    const up = cardUpdate(e);
+    assert.equal(up.description, '改过的人设');
+    assert.equal(up.first_mes, '原开场');
+    assert.deepEqual(up.alternate_greetings, ['原开场2', '新开场'], '新开场白加在后面');
+});
+
+await check('改已有的卡：写卡工坊做的卡能认回各个步骤；没绑世界书时读卡里嵌的', async () => {
+    const { buildEntries, toWorldData, worldToBook } = await import('../src/assemble.js');
+    const made = toWorldData(buildEntries(d, { personaPlace: 'green' }));
+    const e = flow.loadCard({ avatar: 'a.png', data: { name: '迟春', description: '' } }, made, '迟春');
+    assert.equal(e.tone, d.tone);
+    assert.equal(e.world.main, d.world.main);
+    assert.deepEqual(e.personas.map((p) => p.name), d.personas.map((p) => p.name));
+    assert.equal(e.personas[0].overview, d.personas[0].overview, '概要从“人设概要”条目认回来');
+    assert.deepEqual(e.npcs.map((n) => n.name), d.npcs.map((n) => n.name));
+    assert.deepEqual(e.routes.map((r) => r.name), d.routes.map((r) => r.name));
+    assert.equal(e.existing.entries.length, 0);
+    const e2 = flow.loadCard({ avatar: 'b.png', data: { name: '迟春', character_book: worldToBook('x', made) } }, null, '');
+    assert.equal(e2.tone, d.tone, '嵌在卡里的世界书也能读');
+    assert.equal(e2.existing.hadWorld, false);
+});
+
 assert.equal(replies.length, 0);
 console.log(`\n${passed} passed`);
