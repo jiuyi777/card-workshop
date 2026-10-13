@@ -119,3 +119,29 @@
 /* 选卡 */
 .cw-cardsel { min-height: 10em; }
 .cw-cardsel option { padding: 4px 6px; }
+
+/* AU 检查 */
+.cw-verdict { display: inline-block; font-size: 0.82em; padding: 0 6px; border-radius: 4px; margin-right: 4px; }
+.cw-verdict.v-保留 { background: rgba(80, 160, 110, 0.3); }
+.cw-verdict.v-偏离 { background: rgba(220, 150, 60, 0.3); }
+.cw-verdict.v-丢了 { background: rgba(210, 70, 70, 0.3); }
+.cw-warntext { color: #d08a2c; }
+
+/* 每页底部的八股检查 */
+.cw-bagubar { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; padding: 8px 10px; border-radius: 8px; border: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor) 50%, transparent); }
+.cw-bagubar.hit { border-color: rgba(220, 150, 60, 0.7); background: rgba(220, 150, 60, 0.06); }
+
+/* token */
+.cw-tokline { display: flex; justify-content: flex-end; margin-top: -4px; }
+.cw-tok { font-size: 0.8em; opacity: 0.6; }
+.cw-tok.cw-warntext { opacity: 1; font-weight: 600; }
+.cw-tokrow { display: flex; gap: 8px; padding: 1px 0; }
+
+/* 试玩 */
+.cw-chat { display: flex; flex-direction: column; gap: 8px; }
+.cw-msg { padding: 8px 10px; border-radius: 10px; display: flex; flex-direction: column; gap: 4px; }
+.cw-msg.char { background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent); border-left: 3px solid var(--SmartThemeQuoteColor); }
+.cw-msg.user { background: color-mix(in srgb, var(--SmartThemeQuoteColor) 10%, transparent); margin-left: 12%; }
+.cw-msghead { margin: 0; }
+.cw-msghead .cw-btn { font-size: 0.82em; padding: 2px 8px; }
+.cw-msgtext { white-space: normal; word-break: break-word; }

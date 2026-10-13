@@ -105,6 +105,9 @@ export function scanCard(text, kind, { names = [], pistol = false } = {}) {
     }
     if (kind === 'persona') {
         for (const l of unexplainedLabels(s)) push(out, 'label', 'error', '标签没有行为解释', l);
+        const ls = lifeStoryStats(s);
+        if (!ls.found) push(out, 'story', 'warn', '没写经历', '可以点“展开经历”');
+        else if (ls.count < 3 || ls.chars / Math.max(1, ls.count) < 40) push(out, 'story', 'warn', `经历太少（${ls.count} 段，${ls.chars} 字）`, '可以点“展开经历”');
     }
     if (kind === 'world' && !pistol) {
         const adj = [...s.matchAll(ADJ)].map((m) => m[0]);
@@ -192,4 +195,74 @@ export function crossCompare(personas, threshold = 0.5) {
         }
     }
     return out.sort((x, y) => y.count - x.count);
+}
+
+/** 人设里 life_story 写了几段、写了多少字 */
+export function lifeStoryStats(text) {
+    const lines = String(text ?? '').split('\n');
+    const i = lines.findIndex((l) => /^\s*life_story\s*:/.test(l));
+    if (i < 0) return { count: 0, chars: 0, found: false };
+    const base = lines[i].match(/^\s*/)[0].length;
+    let count = 0;
+    let chars = 0;
+    let itemIndent = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j];
+        if (!l.trim()) continue;
+        const ind = l.match(/^\s*/)[0].length;
+        if (ind <= base) break;
+        if (/^\s*-\s/.test(l)) {
+            if (itemIndent < 0) itemIndent = ind;
+            if (ind === itemIndent) count++;
+        }
+        chars += l.replace(/^\s*-?\s*[^:：\s]{1,8}[:：]\s*/, '').replace(/[\s\-:：]/g, '').length;
+    }
+    return { count, chars, found: true };
+}
+
+/** 经历太少：少于 3 段，或者平均每段不到 40 字 */
+export function thinLifeStory(text) {
+    const s = lifeStoryStats(text);
+    return !s.found || s.count < 3 || s.chars / Math.max(1, s.count) < 40;
+}
+
+/** 把 life_story 整块换进人设 YAML：有就替换，没有就插在 current_state 前面（或者结尾标签前） */
+export function mergeLifeStory(persona, block) {
+    const text = String(persona ?? '');
+    const raw = String(block ?? '').replace(/^\s*```[a-z]*\s*\n?|\n?```\s*$/g, '');
+    const blines = raw.split('\n');
+    const head = blines.findIndex((l) => /^\s*life_story\s*:/.test(l));
+    if (head < 0) return text;
+    const bodyLines = blines.slice(head);
+    const bBase = bodyLines[0].match(/^\s*/)[0].length;
+    const lines = text.split('\n');
+    const i = lines.findIndex((l) => /^\s*life_story\s*:/.test(l));
+    let indent;
+    let at;
+    let end;
+    if (i >= 0) {
+        indent = lines[i].match(/^\s*/)[0].length;
+        end = i + 1;
+        while (end < lines.length && (!lines[end].trim() || lines[end].match(/^\s*/)[0].length > indent)) end++;
+        // 末尾空行留给下一段
+        while (end > i + 1 && !lines[end - 1].trim()) end--;
+        at = i;
+    } else {
+        const cs = lines.findIndex((l) => /^\s*current_state\s*:/.test(l));
+        if (cs >= 0) { indent = lines[cs].match(/^\s*/)[0].length; at = cs; end = cs; }
+        else {
+            const close = lines.findIndex((l) => /^\s*<\/[^>]+>\s*$/.test(l));
+            at = close >= 0 ? close : lines.length; end = at;
+            // 跟人设的一级字段对齐（gender、identity……），找不到就用最常见的缩进
+            const known = lines.slice(0, at).find((l) => /^\s+(?:gender|age|identity|current_state|social_connection|appearance|对白风格|矛盾轴|内部描述|角色细节|行为指导)\s*[:：]/.test(l));
+            if (known) indent = known.match(/^\s*/)[0].length;
+            else {
+                const counts = new Map();
+                for (const l of lines.slice(0, at)) if (/^\s+[^\s-][^:：]*[:：]/.test(l)) { const n = l.match(/^\s*/)[0].length; counts.set(n, (counts.get(n) ?? 0) + 1); }
+                indent = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+            }
+        }
+    }
+    const shifted = bodyLines.map((l) => (l.trim() ? ' '.repeat(indent) + l.slice(Math.min(bBase, l.match(/^\s*/)[0].length)) : l)).join('\n').replace(/\s+$/, '');
+    return [...lines.slice(0, at), shifted, ...lines.slice(end)].join('\n');
 }

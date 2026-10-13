@@ -90,12 +90,20 @@ function respond(messages) {
     prompts.push(all);
     assert.ok(!all.includes('<user>'), '发出去的提示词里不能有 <user>（会被酒馆换成名字）');
     const u = messages.at(-1).content;
+    if (String(messages[0]?.content).includes('你来扮演卡里的角色')) return `迟春看着〔user〕，没说话。（第 ${messages.length} 条）`;
+    if (u.includes('扮演玩家〔user〕，给角色回一条消息')) return '（后退一步）你是谁？';
+    if (u.includes('角色卡的试玩记录')) return JSON.stringify({ score: 6, good: ['克制'], issues: [{ where: '第 3 条', problem: '只会接话', part: 'persona', name: '迟春', fix: '给他一件自己想做的事' }] });
     if (u.includes('方向不同的角色卡构想')) {
         return JSON.stringify({
             tags: { picked: ['酸涩'], guessed: { 性向: 'BG', 人数: '1v1', 卡类型: '单人卡' }, novel: [{ dim: '情节梗', name: '季节限定' }], surprise: { dim: '时代与题材', name: '规则怪谈', why: '循环' } },
             concepts: [{ title: '他每年春天回来，每年都不认识我', lineup: [{ name: '迟春', identity: '只在春天存在的人', archetype: ['神明'] }], user: ['记得一切的人'], relation: '去年春末他提出请求，你犹豫了。', tension: { core: '只有你记得', expect: ['他在夏天出现'] }, complexity: '中等', routes: [{ name: '第一个春天', user: '初见者', period: '去年' }, { name: '失去之后', user: '等待者', period: '今年' }], npcs: 1, tags: ['仙侠'] }],
         });
     }
+    if (u.includes('为角色「黎曙」写人设')) return '<<<概要>>>\n外卖骑手。\n<<<人设>>>\n<黎曙>\n只信自己。\n</黎曙>';
+    if (u.includes('写过去的经历')) return 'life_story:\n  - 时期: 小时候\n    发生了什么: 有个人在冬天把半块饼塞给他，第二天那个人被打断了手，他一直记着这件事。\n    留下了什么: 欠了的要还\n    现在: 有人对他好时先算欠了多少\n  - 时期: 少年\n    发生了什么: 他第一次自己选择留下，代价是错过了唯一一次离开的机会，后来再也没走成。\n    留下了什么: 走不掉\n    现在: 想走时会回头\n  - 时期: 去年\n    发生了什么: 春天快结束的时候〔user〕说想抱他一次，他犹豫了，春天就结束了，他什么也没来得及做。\n    留下了什么: 怕再犹豫\n    现在: 看到〔user〕就往前走一步';
+    if (u.includes('先把每个主要角色拆成两层')) return '<<<内核:黎曙>>>\n矛盾轴: 只信自己 ↔ 放不下一起挨过饿的人\n<<<外壳>>>\n- 扒手团';
+    if (u.includes('把原作的外壳一项项换成 AU')) return '原：扒手团 → AU：城中村外卖站｜一起熬夜跑单的人就是一起挨过饿的人';
+    if (u.includes('检查 AU 版人设有没有保住原作角色的内核')) return JSON.stringify({ items: [{ core: '只信自己', verdict: '保留' }, { core: '放不下一起挨过饿的人', verdict: '丢了', where: '没写到', fix: '写他替新人兜底' }], leftovers: [] });
     if (u.includes('这是一张已经写好的卡。给它想')) return JSON.stringify({ routes: [{ name: '重逢', user: '仇人', period: '十年后', why: '他欠你一条命' }] });
     if (u.includes('按作者的意见修改下面这段')) return '领头叫鬼姐，是个女人。';
     if (u.includes('针对这个脑洞问作者')) return JSON.stringify({ questions: [{ q: '那个拥抱为什么没完成？', options: ['你犹豫了', '他先走了', '春天提前结束'] }] });
@@ -141,6 +149,8 @@ function type(sel, value) {
     el.dispatchEvent(new window.Event('input', { bubbles: true }));
 }
 const draft = () => ctx.extensionSettings.cardWorkshop.draft;
+const { lifeStoryStats } = await import(pathToFileURL(path.join(root, 'src/checks.js')).href);
+const lifeStoryCount = (t) => lifeStoryStats(t).count;
 
 // ───── 加载扩展 ─────
 await import(pathToFileURL(path.join(tp, 'card-workshop', 'index.js')).href);
@@ -163,7 +173,7 @@ await check('扩展加载：魔棒菜单和设置面板都有，提示词编辑�
 await check('打开是目录：每一步一个入口，提示“下一步”', async () => {
     $('#cw_menu_button').trigger('click');
     await until(() => cw().length);
-    assert.equal(cw().find('.cw-tile').length, 13, '11 步 + 设置 + 提示词');
+    assert.equal(cw().find('.cw-tile').length, 14, '12 步 + 设置 + 提示词');
     assert.ok(cw().find('.cw-next').text().includes('一句话构想'));
     assert.equal(cw().find('textarea[data-bind="idea"]').length, 0, '目录页不堆内容');
 });
@@ -237,6 +247,8 @@ await check('一键出卡（在目录）：跑完后跳到质检页', async () =
         assert.ok(prompts.some((p) => p.includes('整句修改约束')), '用了八股清理的提示词');
     }
     assert.ok(prompts.find((p) => p.includes('为角色「迟春」写人设')).includes('锚'), '问答答案进了人设提示词');
+    assert.ok(prompts.some((p) => p.includes('为角色「迟春」写过去的经历')), '人设里经历太少，一键出卡自动展开了经历');
+    assert.ok(prompts.find((p) => p.includes('和“这类角色的刻板写法”撞了')).includes('发生了什么'), '展开的经历带进了后面的步骤（重写撞车时原样保留）');
     assert.ok(title().includes('质检'));
     assert.ok(toasts.every((t) => t[0] !== 'err'), JSON.stringify(toasts));
 });
@@ -449,6 +461,77 @@ await check('八股清理不碰基调与规则', async () => {
     assert.equal(draft().tone, before);
 });
 
+await check('每一页底部都有八股检查：本地扫描、只清理这一页、能换回上一版', async () => {
+    await go('world');
+    draft().world.main = '<世界观>\n城门口，守卫嘴角勾起一抹若有若无的弧度。\n</世界观>';
+    draft().npcs[0].content = '<守庙人>\n他嘴角勾起一抹若有若无的弧度。\n</守庙人>';
+    await go('world');
+    const bar = cw().find('.cw-bagubar');
+    assert.equal(bar.length, 1, '世界观页有八股检查');
+    if (withBagu) {
+        assert.ok(bar.hasClass('hit'));
+        assert.ok(bar.text().includes('世界观'));
+        const n = prompts.length;
+        await click('[data-act="baguPage"]');
+        assert.ok(!draft().world.main.includes('的弧度'), '世界观清理了');
+        assert.ok(draft().npcs[0].content.includes('的弧度'), '别的页不动');
+        assert.ok(prompts.length > n);
+        assert.ok(cw().find('.cw-bagubar').text().includes('改了'), '显示清理结果');
+        await click('[data-act="restore"][data-key="world"]');
+        assert.ok(draft().world.main.includes('的弧度'), '换回上一版能找回清理前的');
+    }
+    for (const pg of ['persona', 'npc', 'routes', 'greet', 'intro']) {
+        await go(pg);
+        assert.equal(cw().find('.cw-bagubar').length, 1, `${pg} 页有八股检查`);
+    }
+    await go('greet');
+    assert.ok(!cw().find('.cw-bagubar').text().includes('基调与规则'));
+});
+
+await check('试玩：开始 → 自己发一句 → AI 扮 user 跑一轮 → 点评 → 带着意见去人设页', async () => {
+    await go('play');
+    assert.ok(title().includes('试玩'));
+    await click('[data-act="playStart"]');
+    assert.equal(draft().play.messages.length, 1);
+    assert.ok(cw().find('.cw-msg.char').length === 1);
+    type('textarea[data-bind="play.input"]', '你好');
+    await click('[data-act="playSend"]');
+    assert.equal(draft().play.messages.length, 3);
+    assert.ok(draft().play.messages[2].text.startsWith('迟春看着'));
+    type('input[data-bind="play.rounds"]', '1');
+    await click('[data-act="playAuto"]');
+    assert.equal(draft().play.messages.length, 5);
+    assert.equal(draft().play.messages[3].text, '（后退一步）你是谁？');
+    assert.ok(cw().text().includes('这一轮发出去的设定'));
+    await click('[data-act="playRedo"]');
+    assert.equal(draft().play.messages.length, 5);
+    await click('[data-act="playCut"]', 1);
+    assert.equal(draft().play.messages.length, 2, '删到第 3 条');
+    await click('[data-act="playAuto"]');
+    await click('[data-act="playReview"]');
+    assert.ok(cw().text().includes('6 / 10'));
+    await click('[data-act="playFix"]');
+    assert.ok(title().includes('主要人设'));
+    assert.ok(draft().feedback['persona:迟春'].includes('给他一件自己想做的事'));
+    assert.ok(cw().find('input[data-bind="feedback.persona:迟春"]').val().includes('只会接话'));
+});
+
+await check('token：大文本框下面有 token 数，目录和导入页有常驻设定合计，超上限标出来', async () => {
+    await go('persona');
+    const tok = cw().find('.cw-tok[data-tok-path="personas.0.text"]');
+    assert.ok(tok.length && /token/.test(tok.text()));
+    const before = tok.text();
+    type('textarea[data-bind="personas.0.text"]', draft().personas[0].text + '再加很多很多字'.repeat(50));
+    assert.notEqual(cw().find('.cw-tok[data-tok-path="personas.0.text"]').text(), before, '打字时跟着变');
+    await go('home');
+    assert.ok(cw().find('[data-tok-blue]').text().includes('常驻设定'));
+    ctx.extensionSettings.cardWorkshop.blueBudget = 10;
+    await go('import');
+    assert.ok(cw().find('[data-tok-blue]').hasClass('cw-warntext'));
+    assert.ok(cw().text().includes('每一块多少'));
+    ctx.extensionSettings.cardWorkshop.blueBudget = 4000;
+});
+
 await check('改已有的卡：选卡读进来，原卡内容页能改、按意见改', async () => {
     await ctx.getCharacters();
     await go('home');
@@ -511,19 +594,54 @@ await check('改已有的卡：写回原卡（条目合并、新开场白加在�
     assert.ok(!cards['黎曙.png'].data.character_book, '原来没有内嵌世界书，撤销后也没有');
 });
 
+await check('AU：选卡 → 用这张卡做 AU → 提取内核 → 写设定 → 映射表 → 一键出卡（含一致性检查和修）→ 存成新卡，原卡不动', async () => {
+    const origCard = JSON.stringify(cards['黎曙.png']);
+    await go('home');
+    await click('[data-act="go"][data-page="load"]');
+    cw().find('.cw-cardsel').val('黎曙.png');
+    await click('[data-act="loadAU"]');
+    assert.ok(title().includes('AU 内核与映射'));
+    assert.equal(draft().name, '黎曙（AU）');
+    assert.ok(!draft().existing);
+    await click('[data-act="auCore"]');
+    assert.ok(cw().find('textarea[data-bind="au.core.0.text"]').val().includes('放不下'));
+    assert.ok(!cw().find('[data-act="auMap"]').length, '没写 AU 设定前不能生成映射表');
+    type('textarea[data-bind="idea"]', '现代都市，他是外卖骑手');
+    await go('home'); await go('au');
+    await click('[data-act="auMap"]');
+    assert.ok(draft().au.map.includes('外卖站'));
+    const n0 = prompts.length;
+    await go('home');
+    await click('[data-act="auto"]');
+    const ps = prompts.slice(n0);
+    assert.ok(!ps.some((p) => p.includes('方向不同的角色卡构想')), 'AU 不出构想');
+    const pp = ps.find((p) => p.includes('为角色「黎曙」写人设'));
+    assert.ok(pp.includes('【角色内核】') && pp.includes('外卖站'));
+    assert.ok(ps.some((p) => p.includes('检查 AU 版人设')), '做了一致性检查');
+    assert.ok(ps.some((p) => p.includes('按作者的意见修改') && p.includes('写他替新人兜底')), '按检查结果修了');
+    assert.ok(draft().world.main && draft().routes.length && draft().greetings.length);
+    await go('persona');
+    assert.ok(cw().find('.cw-verdict').length, '人设页显示检查结果');
+    await go('import');
+    assert.ok(cw().find('[data-act="import"]').length && !cw().find('[data-act="writeBack"]').length, 'AU 只能存成新卡');
+    await click('[data-act="import"]');
+    const create = requests.filter((r) => r.url === '/api/characters/create').at(-1).body;
+    assert.equal(create.ch_name, '黎曙（AU）');
+    assert.equal(JSON.stringify(cards['黎曙.png']), origCard, '原卡一点没动');
+});
+
 await check('新建草稿：旧的进历史，能读回来', async () => {
     await go('home');
     await click('[data-act="newDraft"]');
     assert.equal(draft().idea, '');
     const s = ctx.extensionSettings.cardWorkshop;
-    assert.equal(s.drafts[0].name, '黎曙');
-    assert.equal(s.drafts[1].name, '迟春');
+    assert.deepEqual(s.drafts.slice(0, 3).map((x) => x.name), ['黎曙（AU）', '黎曙', '迟春']);
     const sel = cw().find('.cw-hist').get(0);
-    sel.value = '1';
+    sel.value = '2';
     sel.dispatchEvent(new window.Event('change', { bubbles: true }));
     await tick();
     assert.equal(draft().name, '迟春');
-    assert.deepEqual(s.drafts.map((x) => x.name), ['黎曙'], '读回来的草稿离开历史；新建的空草稿不进历史');
+    assert.deepEqual(s.drafts.map((x) => x.name), ['黎曙（AU）', '黎曙'], '读回来的草稿离开历史；新建的空草稿不进历史');
 });
 
 fs.rmSync(tp, { recursive: true, force: true });

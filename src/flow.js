@@ -3,8 +3,8 @@
 import { DEFAULT_PROMPTS, DEFAULT_RULES, PERSONA_TEMPLATE, SYSTEM_CARD, SYSTEM_PROSE, STEP_INFO, fill, ruleVars } from './prompts.js';
 import { parseJSON, splitBlocks, blockOf, extractTagged, clip, stripWords, wordList, findWords } from './parse.js';
 import { matchTags, sanitizeTags, toggleTag, tagsText, tagValue, libraryText, findTag, rollDice, PLATFORM_STYLE, dimOf } from './tags.js';
-import { conceptText, answersText, overviewsText, routesText, composeIntro, parseTitles, orderedGreetings, DEFAULT_INTRO_STYLE, cardToDraft, existingSummary } from './assemble.js';
-import { scanCard, predictOverlap, crossCompare } from './checks.js';
+import { conceptText, answersText, overviewsText, routesText, composeIntro, parseTitles, orderedGreetings, DEFAULT_INTRO_STYLE, cardToDraft, existingSummary, emptyDraft, sentContext, contextText } from './assemble.js';
+import { scanCard, predictOverlap, crossCompare, mergeLifeStory, lifeStoryStats } from './checks.js';
 
 const arr = (x) => (Array.isArray(x) ? x : x == null || x === '' ? [] : [x]);
 const str = (x) => (x == null ? '' : String(x).trim());
@@ -47,7 +47,7 @@ export function makeFlow(deps) {
         return {
             idea: d.idea,
             tags: tagsText(d.tags, L()) || '（未选）',
-            concept: concept(d) ? conceptText(concept(d)) : (d.existing ? existingSummary(d) : conceptText(null)),
+            concept: concept(d) ? conceptText(concept(d)) : d.au ? auSummary(d) : (d.existing ? existingSummary(d) : conceptText(null)),
             platform: platform(d),
             overviews: overviewsText(d),
             personas: clip((d.personas ?? []).map((p) => p.text).filter(Boolean).join('\n\n'), 6000),
@@ -102,6 +102,7 @@ export function makeFlow(deps) {
             free: { get: () => fr()?.content ?? '', set: (v) => { const f = fr(); if (f) f.content = v; } },
             intro: { get: () => d.intro, set: (v) => { d.intro = v; } },
             exist: existSlot(d, name),
+            au: { get: () => (name === 'map' ? d.au?.map : { core: d.au?.core, shell: d.au?.shell }), set: (v) => { if (name === 'map') d.au.map = v; else { d.au.core = v.core; d.au.shell = v.shell; } } },
             route: { get: () => d.routes.find((r) => r.name === name)?.info ?? '', set: (v) => { const r = d.routes.find((x) => x.name === name); if (r) r.info = v; } },
         }[kind];
     }
@@ -158,6 +159,111 @@ export function makeFlow(deps) {
         for (let k = 2; d.routes.some((x) => x.name === name); k++) name = `${r.name}${k}`;
         d.routes.push({ name, user: r.user, period: r.period, info: '' });
         d.routeIdeas.splice(i, 1);
+        return d;
+    }
+
+    // ───── AU ─────
+
+    /** 原卡全文（给提取内核、映射表看） */
+    function auOriginal(d, max = 9000) {
+        const o = d.au?.original;
+        if (!o) return '';
+        const parts = [`卡名：${o.name}`];
+        for (const p of o.personas) parts.push(`【人设·${p.name}】${p.overview ? `\n概要：${p.overview}` : ''}\n${clip(p.text, 3500)}`);
+        if (o.world) parts.push(`【世界观】\n${clip(o.world, 1500)}`);
+        for (const e of o.entries.slice(0, 8)) parts.push(`【${e.comment}】\n${clip(e.content, 500)}`);
+        if (o.routes) parts.push(`【路线】\n${clip(o.routes, 800)}`);
+        if (o.greeting) parts.push(`【开场白节选】\n${clip(o.greeting, 400)}`);
+        return clip(parts.join('\n\n'), max);
+    }
+
+    const coreText = (d, name) => (d.au?.core ?? []).filter((c) => !name || c.name === name).map((c) => `${c.name}：\n${str(c.text)}`).join('\n\n');
+
+    /** AU 草稿的“构想”：AU 设定 + 内核 + 映射表 */
+    function auSummary(d) {
+        const au = d.au;
+        return [
+            `这是《${au.original?.name ?? ''}》里角色的 AU：换了世界观和身份，人还是那个人。`,
+            `【AU 设定】\n${str(d.idea) || '（还没写）'}${ideaAnswers(d) ? `\n${ideaAnswers(d)}` : ''}`,
+            `【角色内核】（必须保留，行为要从这里长出来）\n${coreText(d) || '（还没提取）'}`,
+            au.map ? `【映射表】（原作 → AU）\n${au.map}` : '',
+            '写的时候只写 AU 世界里的样子：原作的地名、组织、道具、事件不要出现，除非映射表给了对应。AU 题材的套路可以用，但角色的反应来自内核，不要变成这个题材的默认角色。',
+        ].filter(Boolean).join('\n\n');
+    }
+
+    /** 用一张已有的卡开一个 AU 新草稿（原卡不动） */
+    function auStart(card, worldData, worldName) {
+        const src = cardToDraft(card, worldData, worldName);
+        const d = emptyDraft();
+        d.name = `${src.name}（AU）`;
+        d.nameAuto = false;
+        d.tags = sanitizeTags(src.tags.map((t) => t.name), L()).filter((t) => ['cp', 'count', 'userGender', 'rating', 'platform'].includes(t.dim));
+        d.personas = src.personas.map((p) => ({ name: p.name, keys: p.keys ?? [], overview: '', text: '' }));
+        d.au = {
+            original: {
+                name: src.name,
+                avatar: card?.avatar ?? '',
+                personas: src.personas.map((p) => ({ name: p.name, overview: p.overview, text: p.text })),
+                world: src.world.main,
+                entries: [...src.world.extra.map((e) => ({ comment: e.name, content: e.content })), ...src.npcs.map((n) => ({ comment: `NPC·${n.name}`, content: n.content })), ...src.existing.entries.map((e) => ({ comment: e.comment, content: e.content }))],
+                routes: src.routes.map((r) => `${r.name}：${r.info}`).join('\n'),
+                greeting: src.existing.greetings[0] ?? '',
+            },
+            core: src.personas.map((p) => ({ name: p.name, text: '' })),
+            shell: '',
+            map: '',
+            checks: {},
+        };
+        d.pick = -1;
+        return d;
+    }
+
+    async function auCore(d) {
+        if (!d.au) throw new Error('不是 AU 草稿');
+        const raw = await run('auCore', d, { original: auOriginal(d) }, { key: 'au:core', prev: coreText(d) });
+        remember(d, 'au:core', { core: d.au.core, shell: d.au.shell });
+        const parsed = splitBlocks(raw);
+        const byName = new Map(parsed.blocks.filter((b) => b.type === '内核').map((b) => [b.name, b.body]));
+        d.au.core = d.au.core.map((c, i) => ({ name: c.name, text: byName.get(c.name) ?? [...byName.values()][i] ?? c.text }));
+        d.au.shell = blockOf(parsed, '外壳') || d.au.shell;
+        return d;
+    }
+
+    async function auMap(d) {
+        if (!d.au) throw new Error('不是 AU 草稿');
+        if (!str(d.idea)) throw new Error('先写 AU 设定');
+        if (!coreText(d).replace(/[^\u4e00-\u9fff]/g, '')) throw new Error('先提取内核');
+        const raw = await run('auMap', d, { core: coreText(d), shell: d.au.shell || '（没列）', original: auOriginal(d, 4000) }, { key: 'au:map', prev: d.au.map });
+        remember(d, 'au:map', d.au.map);
+        d.au.map = raw.trim();
+        return d;
+    }
+
+    /** 内核一致性检查：逐条看 AU 人设有没有保住内核 */
+    async function auCheck(d, name) {
+        const p = d.personas.find((x) => x.name === name);
+        if (!p?.text) throw new Error(`${name} 还没有 AU 人设`);
+        const core = coreText(d, name);
+        if (!core) throw new Error('没有这个角色的内核');
+        const j = parseJSON(await run('auCheck', d, { name, core, persona: p.text }, { json: true }));
+        const items = arr(j.items).map((x) => ({ core: str(x.core), verdict: ['保留', '偏离', '丢了'].includes(str(x.verdict)) ? str(x.verdict) : '偏离', where: str(x.where), fix: str(x.fix) })).filter((x) => x.core);
+        d.au.checks[name] = { items, leftovers: arr(j.leftovers).map(str).filter(Boolean), fixed: false };
+        return d.au.checks[name];
+    }
+
+    /** 按检查结果修：把偏离和残留写成修改意见，按意见改 */
+    async function auFix(d, name) {
+        const c = d.au?.checks?.[name];
+        const bad = (c?.items ?? []).filter((x) => x.verdict !== '保留');
+        if (!bad.length && !c?.leftovers?.length) return d;
+        const fb = [
+            ...bad.map((x) => `- 内核“${x.core}”${x.verdict}${x.where && x.where !== '没写到' ? `（「${x.where}」）` : ''}：${x.fix || '改回内核的样子'}`),
+            ...(c.leftovers.length ? [`- 删掉或换掉原作世界的残留：${c.leftovers.join('、')}`] : []),
+        ].join('\n');
+        d.feedback ??= {};
+        d.feedback[`persona:${name}`] = fb;
+        await revise(d, `persona:${name}`);
+        c.fixed = true;
         return d;
     }
 
@@ -380,6 +486,21 @@ export function makeFlow(deps) {
         return d;
     }
 
+    /** 单独展开经历：一次只写经历，写完合并回人设的 life_story */
+    async function backstory(d, name) {
+        const p = d.personas.find((x) => x.name === name);
+        if (!p?.text?.trim()) throw new Error(`${name} 还没有人设`);
+        const key = `persona:${name}`;
+        const answers = (d.qa?.chars ?? []).filter((c) => c.name === name).flatMap((c) => c.questions)
+            .filter((q) => q.answer?.trim()).map((q) => `${q.q}\n→ ${q.answer.trim()}`).join('\n');
+        const raw = await run('backstory', d, { name, persona: p.text, answers: answers || answersText(d), count: S().backstoryCount || '4–7' }, { key: `backstory:${name}`, prev: p.text });
+        const block = raw.slice(Math.max(0, raw.search(/life_story\s*:/)));
+        if (!/life_story\s*:/.test(block)) throw new Error('AI 没按格式写经历，再试一次');
+        remember(d, key, { overview: p.overview, text: p.text });
+        p.text = mergeLifeStory(p.text, block);
+        return lifeStoryStats(p.text);
+    }
+
     // ───── 3. 世界观 ─────
     async function world(d) {
         const complexity = tagValue(d.tags, 'complexity')[0] ?? concept(d)?.complexity ?? '简单';
@@ -543,6 +664,150 @@ export function makeFlow(deps) {
         return texts.length;
     }
 
+    // ───── 试玩 ─────
+    const charName = (d) => str(d.existing?.name) || str(d.personas?.[0]?.name) || str(d.name) || '角色';
+
+    /** 可以从哪些开场白开始：原卡的在前，新写的在后 */
+    function playGreetings(d) {
+        const out = [];
+        const origRoute = d.routes.find((r) => r.orig)?.name ?? d.routes[0]?.name ?? '';
+        (d.existing?.greetings ?? []).forEach((t, i) => { if (str(t)) out.push({ label: `原卡·${i === 0 ? '主开场白' : `开场白 ${i + 1}`}`, text: t, route: origRoute }); });
+        const counts = {};
+        for (const g of orderedGreetings(d)) {
+            counts[g.route] = (counts[g.route] ?? 0) + 1;
+            out.push({ label: `${g.route || '主线'} · ${counts[g.route]}`, text: g.text, route: g.route });
+        }
+        return out;
+    }
+
+    /** 试玩时把 {{char}}、<user> 换成名字（user 名字空着就保持 <user>） */
+    function playSub(d, text) {
+        const p = d.play ?? {};
+        let t = String(text ?? '').replace(/\{\{char\}\}|〔char〕/gi, charName(d));
+        const u = str(p.userName);
+        if (u) {
+            const tok = str(S().userToken) || '<user>';
+            t = t.split(tok).join(u).replace(/\{\{user\}\}|〔user〕|<user>/gi, u);
+        }
+        return t;
+    }
+
+    function playTranscript(d, max = 8000) {
+        const p = d.play;
+        const t = (p?.messages ?? []).map((m, i) => `[第 ${i + 1} 条] ${m.role === 'char' ? charName(d) : '〔user〕'}：${m.text}`).join('\n\n');
+        return t.length > max ? `……（前面省略）\n${t.slice(-max)}` : t;
+    }
+
+    const playRoute = (d) => {
+        const i = d.routes.findIndex((r) => r.name === d.play?.route);
+        return i < 0 ? 0 : i;
+    };
+
+    /** 这一轮会发出去的设定（蓝灯 + 当前路线 + 最近几条消息里提到的绿灯） */
+    function playContext(d) {
+        const scan = (d.play?.messages ?? []).slice(-5).map((m) => m.text).join('\n');
+        return sentContext(d, { personaPlace: S().personaPlace, activeRoute: playRoute(d), scan });
+    }
+
+    function playStart(d, gi) {
+        const list = playGreetings(d);
+        const g = list[gi] ?? list[0];
+        if (!g) throw new Error('还没有开场白，先去开场白页写一个');
+        d.play = { ...(d.play ?? {}), greet: list.indexOf(g), route: g.route, messages: [{ role: 'char', text: g.text }], review: null, input: '' };
+        return d.play;
+    }
+
+    async function playChar(d) {
+        const p = d.play;
+        if (!p?.messages?.length) throw new Error('先选一个开场白，点“开始”');
+        if (p.messages.at(-1).role !== 'user') throw new Error('先写一句 user 的话');
+        check();
+        const c = playContext(d);
+        p.sent = [...c.before, ...c.card, ...c.after].map((x) => x.label);
+        const system = playSub(d, fill(promptOf('playChar'), { ...baseVars(d), char: charName(d), card: contextText(c), length: S().playLength || 300 }));
+        const messages = p.messages.map((m) => ({ role: m.role === 'char' ? 'assistant' : 'user', content: playSub(d, m.text) }));
+        progress(`${STEP_INFO.playChar.name}…`);
+        const out = await deps.llm({ system, messages, stage: STEP_INFO.playChar.stage, temperature: STEP_INFO.playChar.temp });
+        check();
+        p.messages.push({ role: 'char', text: str(out) });
+        p.review = null;
+        return p;
+    }
+
+    const PLAY_STYLES = {
+        普通: '普通玩家：顺着剧情走，偶尔提问，给角色留空间。',
+        唱反调: '爱唱反调的玩家：拒绝、怀疑、刁难，试探角色的底线，看角色会不会崩。',
+        话少: '话很少的玩家：只给很短的回应或一个动作，看角色能不能自己把剧情推下去。',
+        乱来: '不按套路的玩家：做出卡里没预料到的事（突然离开、提起无关的事、做奇怪的决定），看角色和世界怎么接。',
+    };
+
+    /** AI 扮 user 写一条；send=false 时只放进输入框让作者改 */
+    async function playUser(d, { send = true } = {}) {
+        const p = d.play;
+        if (!p?.messages?.length) throw new Error('先选一个开场白，点“开始”');
+        const r = d.routes[playRoute(d)];
+        const out = await run('playUser', d, {
+            style: PLAY_STYLES[p.style] ?? PLAY_STYLES.普通,
+            routeInfo: r ? (r.info || `${r.name}｜〔user〕身份：${r.user || '未定'}`) : '（没有路线信息）',
+            transcript: playTranscript(d, 6000),
+        }, { system: '你在帮作者测试角色卡，扮演玩家。只输出要求的内容。', json: true });
+        const text = str(out).replace(/^〔user〕[：:]\s*/, '');
+        if (send) { p.messages.push({ role: 'user', text }); p.input = ''; } else p.input = text;
+        return text;
+    }
+
+    async function playAuto(d, rounds = 3) {
+        const p = d.play;
+        if (!p?.messages?.length) throw new Error('先选一个开场白，点“开始”');
+        const n = Math.max(1, Math.min(10, Number(rounds) || 3));
+        for (let i = 0; i < n; i++) {
+            check();
+            progress(`试玩 第 ${i + 1}/${n} 轮：AI 扮 user…`);
+            if (p.messages.at(-1).role !== 'user') await playUser(d);
+            progress(`试玩 第 ${i + 1}/${n} 轮：角色回复…`);
+            await playChar(d);
+        }
+        return n;
+    }
+
+    async function playRedo(d) {
+        const p = d.play;
+        if (!p || p.messages.length < 2 || p.messages.at(-1).role !== 'char') throw new Error('最后一条不是角色的回复');
+        p.messages.pop();
+        return playChar(d);
+    }
+
+    async function playReview(d) {
+        const p = d.play;
+        if (!p || p.messages.length < 3) throw new Error('至少跑一两轮再点评');
+        const r = d.routes[playRoute(d)];
+        const j = parseJSON(await run('playReview', d, {
+            routeInfo: r ? (r.info || r.name) : '（没有路线信息）',
+            transcript: playTranscript(d),
+        }, { json: true }));
+        const parts = ['persona', 'world', 'npc', 'routes', 'tone', 'greet'];
+        p.review = {
+            score: Number(j.score) || null,
+            good: arr(j.good).map(str).filter(Boolean),
+            issues: arr(j.issues).map((x) => ({ where: str(x.where), problem: str(x.problem), part: parts.includes(str(x.part)) ? str(x.part) : 'persona', name: str(x.name), fix: str(x.fix) })).filter((x) => x.problem || x.fix),
+        };
+        return p.review;
+    }
+
+    /** 点评里的一条问题 → 去哪一页、意见写进哪一块 */
+    function reviewTarget(d, issue) {
+        const persona = d.personas.find((x) => issue.name && (x.name === issue.name || issue.name.includes(x.name))) ?? d.personas[0];
+        const route = d.play?.route ?? d.routes[0]?.name ?? '';
+        switch (issue.part) {
+            case 'world': return { page: 'world', key: 'world' };
+            case 'npc': return { page: 'npc', key: 'npc' };
+            case 'routes': return { page: 'routes', key: 'routes' };
+            case 'tone': return { page: 'tone', key: 'tone' };
+            case 'greet': return { page: 'greet', key: `greet:${route}` };
+            default: return { page: 'persona', key: `persona:${persona?.name ?? ''}` };
+        }
+    }
+
     // ───── 8. 质检 ─────
     async function predict(d, name) {
         const p = d.personas.find((x) => x.name === name);
@@ -611,27 +876,51 @@ export function makeFlow(deps) {
     }
 
     /** 列出可以交给八股清理的文本位置 */
-    function textSlots(d) {
+    /**
+     * 卡里所有能做八股检查的文字。page 是它所在的页面。
+     * all=true 时把开场白的梗、AU 内核、简介也算上（只在单页检查里用，一键八股清理不碰它们）
+     */
+    function textSlots(d, { all = false } = {}) {
         const slots = [];
-        const slot = (label, kind, get, set) => { if (str(get())) slots.push({ label, kind, get, set }); };
-        slot('基调与规则', '世界书条目', () => d.tone, (v) => { d.tone = v; });
-        if (slots.length) slots[slots.length - 1].rules = true; // 规则清单本来就列着禁用词，八股清理跳过
-        slot('世界观', '世界书条目', () => d.world.main, (v) => { d.world.main = v; });
-        d.world.extra.forEach((e) => slot(`世界观·${e.name}`, '世界书条目', () => e.content, (v) => { e.content = v; }));
+        const slot = (label, kind, page, get, set, more = {}) => { if (str(get())) slots.push({ label, kind, page, get, set, ...more }); };
+        // 规则清单本来就列着禁用词，八股清理跳过
+        slot('基调与规则', '世界书条目', 'tone', () => d.tone, (v) => { d.tone = v; }, { rules: true });
+        slot('世界观', '世界书条目', 'world', () => d.world.main, (v) => { d.world.main = v; });
+        d.world.extra.forEach((e) => slot(`世界观·${e.name}`, '世界书条目', 'world', () => e.content, (v) => { e.content = v; }));
         d.personas.forEach((p) => {
-            slot(`人设概要·${p.name}`, '人设', () => p.overview, (v) => { p.overview = v; });
-            slot(`人设·${p.name}`, '人设', () => p.text, (v) => { p.text = v; });
+            slot(`人设概要·${p.name}`, '人设', 'persona', () => p.overview, (v) => { p.overview = v; });
+            slot(`人设·${p.name}`, '人设', 'persona', () => p.text, (v) => { p.text = v; });
         });
-        d.npcs.forEach((n) => slot(`NPC·${n.name}`, '世界书条目', () => n.content, (v) => { n.content = v; }));
-        d.routes.forEach((r) => slot(`路线·${r.name}`, '世界书条目', () => r.info, (v) => { r.info = v; }));
-        d.free.forEach((f) => slot(`模块·${f.name}`, '世界书条目', () => f.content, (v) => { f.content = v; }));
-        (d.greetings ?? []).forEach((g, i) => slot(`开场白 ${i + 1}`, '开场白', () => g.text, (v) => { g.text = v; }));
+        d.npcs.forEach((n) => slot(`NPC·${n.name}`, '世界书条目', 'npc', () => n.content, (v) => { n.content = v; }));
+        d.routes.forEach((r) => slot(`路线·${r.name}`, '世界书条目', 'routes', () => r.info, (v) => { r.info = v; }));
+        d.free.forEach((f) => slot(`模块·${f.name}`, '世界书条目', f.fromStep ? `step:${f.fromStep}` : 'tone', () => f.content, (v) => { f.content = v; }));
+        if (all) {
+            for (const [route, list] of Object.entries(d.hooks ?? {})) {
+                (list ?? []).forEach((h, i) => slot(`梗·${route} ${i + 1}`, '开场白的梗', 'greet', () => h.text, (v) => { h.text = v; }));
+            }
+        }
+        (d.greetings ?? []).forEach((g, i) => slot(`开场白 ${i + 1}`, '开场白', 'greet', () => g.text, (v) => { g.text = v; }));
         if (d.existing) {
             for (const [k, label] of [['description', '角色描述'], ['personality', '性格'], ['scenario', '场景']]) {
-                slot(`原卡·${label}`, '角色卡', () => d.existing.fields[k], (v) => { d.existing.fields[k] = v; });
+                slot(`原卡·${label}`, '角色卡', 'existing', () => d.existing.fields[k], (v) => { d.existing.fields[k] = v; });
             }
-            d.existing.entries.forEach((e) => slot(`原卡·${e.comment}`, '世界书条目', () => e.content, (v) => { e.content = v; }));
-            d.existing.greetings.forEach((g, i) => slot(`原卡·开场白 ${i + 1}`, '开场白', () => d.existing.greetings[i], (v) => { d.existing.greetings[i] = v; }));
+            d.existing.entries.forEach((e) => slot(`原卡·${e.comment}`, '世界书条目', 'existing', () => e.content, (v) => { e.content = v; }));
+            d.existing.greetings.forEach((g, i) => slot(`原卡·开场白 ${i + 1}`, '开场白', 'existing', () => d.existing.greetings[i], (v) => { d.existing.greetings[i] = v; }));
+        }
+        if (all && d.play?.messages) {
+            // 试玩的回复只查不改：八股多半来自人设和开场白，要去那边改
+            d.play.messages.forEach((m, i) => { if (i > 0 && m.role === 'char') slot(`试玩·第 ${i + 1} 条`, '对话', 'play', () => m.text, (v) => { m.text = v; }, { scanOnly: true }); });
+        }
+        if (all && d.au) {
+            (d.au.core ?? []).forEach((c) => slot(`AU 内核·${c.name}`, '人设', 'au', () => c.text, (v) => { c.text = v; }));
+        }
+        if (all && d.intro) {
+            const parts = d.intro.parts ?? {};
+            if (Object.values(parts).some((x) => str(x))) {
+                for (const k of Object.keys(parts)) slot(`简介·${k}`, '角色卡简介', 'intro', () => parts[k], (v) => { parts[k] = v; }, { introPart: true });
+            } else {
+                slot('简介', '角色卡简介', 'intro', () => d.intro.text, (v) => { d.intro.text = v; });
+            }
         }
         return slots;
     }
@@ -674,7 +963,9 @@ export function makeFlow(deps) {
 
     return {
         banned, strip, restore, remember, slotOf,
-        inspire, ideaFromInspire, ideaQA, hooks, expand, revise, textSlot, suggestRoutes, addRouteIdea, loadCard, localTags, idea, pickConcept, qa, persona, world, npc, routes, tone, free, custom,
+        playGreetings, playStart, playChar, playUser, playAuto, playRedo, playReview, reviewTarget, playContext, charName, PLAY_STYLES,
+        inspire, ideaFromInspire, ideaQA, hooks, expand, revise, textSlot, suggestRoutes, addRouteIdea, loadCard, backstory,
+        auStart, auCore, auMap, auCheck, auFix, localTags, idea, pickConcept, qa, persona, world, npc, routes, tone, free, custom,
         greetings, predict, destale, localCheck, textSlots, intro, composeIntroFor, baseVars,
     };
 }

@@ -85,6 +85,15 @@ await check('API：当前连接走 generateRaw，宏被保护，返回时换回 
     assert.ok(!JSON.stringify(msgs).includes('<user>'));
 });
 
+await check('API：试玩的多轮对话按顺序发，预设在对话前面', async () => {
+    sent.length = 0;
+    await callLLM({ system: '卡', messages: [{ role: 'assistant', content: '开场白{{char}}' }, { role: 'user', content: '<user>：你好' }], stage: 'greeting', settings: { presetGreeting: '文风预设', minInterval: 0 } });
+    const msgs = sent[0].prompt;
+    assert.deepEqual(msgs.map((m) => m.role), ['system', 'system', 'system', 'assistant', 'user']);
+    assert.equal(msgs[3].content, '开场白〔char〕');
+    assert.equal(msgs[4].content, '〔user〕：你好');
+});
+
 await check('API：写卡阶段不带开场白预设；连接配置文件走 sendRequest 并带温度', async () => {
     sent.length = 0;
     const out = await callLLM({ system: 's', user: 'u', stage: 'card', temperature: 0.9, settings: { apiProfile: 'p1', presetGreeting: '文风预设', useTemperature: true, minInterval: 0 }, userToken: '{{user}}' });
@@ -113,6 +122,30 @@ await check('API：遇到 429 自动等待重试，提示倒计时；一直 429 
     await assert.rejects(() => call({ system: 's', user: 'u', settings: { minInterval: 0, retryWaits: [0] } }), /一直返回 429/);
     ctx.generateRaw = async () => { throw new Error('别的错误'); };
     await assert.rejects(() => call({ system: 's', user: 'u', settings: { minInterval: 0, retryWaits: [0] } }), /别的错误/);
+});
+
+await check('API：502 / 网关超时 / 断网自动重试，状态栏说明原因；一直 502 给出明白的错误', async () => {
+    const { callLLM: call, isTransient, isRateLimit, errorKind } = await import('../src/llm.js');
+    for (const m of ['Got response status 502', 'Bad Gateway', 'Gateway Timeout', 'Service Unavailable', 'Failed to fetch', 'Unknown error occurred', 'fetch failed', 'socket hang up']) {
+        assert.ok(isTransient(new Error(m)), m);
+    }
+    assert.ok(!isTransient(new Error('429 Too Many Requests')));
+    assert.ok(!isTransient(new Error('Invalid API key')));
+    assert.ok(!isRateLimit(new Error('Bad Gateway')));
+    assert.equal(errorKind(new Error('Bad Gateway')), '502（服务器暂时出错）');
+    let n = 0;
+    const waited = [];
+    ctx.generateRaw = async () => { n++; if (n === 1) throw new Error('Bad Gateway'); if (n === 2) throw new Error('Got response status 429'); return '好了'; };
+    const out = await call({ system: 's', user: 'u', settings: { minInterval: 0, retryWaits: [1], errorWaits: [1] }, onWait: (sec, why) => waited.push(why) });
+    assert.equal(out, '好了');
+    assert.deepEqual(waited, ['502（服务器暂时出错）', '429（请求太频繁）'], '429 和 502 各算各的次数');
+    ctx.generateRaw = async () => { throw new Error('Got response status 502'); };
+    await assert.rejects(() => call({ system: 's', user: 'u', settings: { minInterval: 0, errorWaits: [0, 0] } }), /一直返回 502.*重试 2 次/);
+    let stop = false;
+    n = 0;
+    ctx.generateRaw = async () => { n++; stop = true; throw new Error('Bad Gateway'); };
+    await assert.rejects(() => call({ system: 's', user: 'u', settings: { minInterval: 0, errorWaits: [5] }, aborted: () => stop }), /已停止/);
+    assert.equal(n, 1, '停止后不再重试');
 });
 
 await check('API：两次调用之间按设置间隔', async () => {

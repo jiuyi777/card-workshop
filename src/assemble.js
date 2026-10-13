@@ -139,6 +139,8 @@ export function buildEntries(draft, { personaPlace = 'blue', personaBlue, active
         const keys = keysOf(f.keys);
         add({ comment: `模块·${f.name}`, content: f.content, constant: f.light !== 'green' || !keys.length, key: keys, position: POS[f.position] ?? POS.after, order: 600 });
     }
+    // 顺序号按上面的先后连着编：1、2、3……（越大越靠近聊天记录）
+    out.forEach((e, i) => { e.bucket = e.order; e.order = i + 1; });
     return out;
 }
 
@@ -403,7 +405,7 @@ export function cardToDraft(card, worldData, worldName = '') {
         else if (kind === 'npc') d.npcs.push({ name: m[1], keys, content });
         else if (kind === 'route') d.routes.push({ name: m[1], user: '', period: '', info: content, orig: true });
         else if (kind === 'free') d.free.push({ name: m[1], desc: '', content, light: e.constant ? 'blue' : 'green', keys, position: e.position === 0 ? 'before' : 'after' });
-        else others.push({ uid: e.uid, comment: comment || `条目 ${e.uid}`, key: e.key ?? [], content, constant: !!e.constant, disable: !!e.disable });
+        else others.push({ uid: e.uid, comment: comment || `条目 ${e.uid}`, key: e.key ?? [], content, constant: !!e.constant, disable: !!e.disable, position: e.position ?? 1, order: e.order ?? 100 });
     }
     for (const p of d.personas) p.overview = overviews[p.name] ?? '';
     const description = String(data.description ?? '');
@@ -471,6 +473,11 @@ export function mergeWorld(worldData, d, { personaPlace = 'blue' } = {}) {
         }
         const isRoute = s.comment.startsWith('路线·');
         const entry = toWorldData([{ ...s, disable: isRoute ? hasActiveRoute || !!s.disable : !!s.disable }]).entries[0];
+        // 新条目接在同类条目后面；没有同类的就接在最后
+        const prefix = s.comment.includes('·') ? s.comment.split('·')[0] + '·' : s.comment;
+        const all = Object.values(data.entries);
+        const same = all.filter((e) => String(e.comment ?? '').startsWith(prefix)).map((e) => Number(e.order) || 0);
+        entry.order = (same.length ? Math.max(...same) : Math.max(0, ...all.map((e) => Number(e.order) || 0))) + 1;
         entry.uid = next;
         entry.displayIndex = next;
         data.entries[next] = entry;
@@ -492,4 +499,41 @@ export function cardUpdate(d) {
         first_mes: greetings[0] ?? '',
         alternate_greetings: greetings.slice(1),
     };
+}
+
+/**
+ * 导入后酒馆真正会发出去的设定：角色前的条目 → 角色描述/性格/场景 → 角色后的条目。
+ * scan 不给时只算蓝灯（常驻）；给了就把关键词出现在 scan 里的绿灯也算上（试玩时用）。
+ * @returns {{before:{label:string,text:string}[], card:{label:string,text:string}[], after:{label:string,text:string}[], green:{label:string,text:string,key:string[]}[]}}
+ */
+export function sentContext(d, { personaPlace = 'blue', activeRoute = 0, scan } = {}) {
+    const ex = d.existing;
+    const view = ex ? { ...d, personas: (d.personas ?? []).filter((p) => !p.fromDescription) } : d;
+    const specs = buildEntries(view, { personaPlace, activeRoute });
+    const orig = (ex?.entries ?? []).map((e) => ({ ...e, orig: true }));
+    const all = [...orig, ...specs].filter((e) => !e.disable && String(e.content ?? '').trim());
+    const hit = (e) => e.constant || (scan != null && (e.key ?? []).some((k) => String(k).trim() && scan.includes(String(k).trim())));
+    const on = all.filter(hit).sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
+    const item = (e) => ({ label: e.comment, text: String(e.content).trim(), key: e.key ?? [] });
+    const card = [];
+    const put = (label, text) => { if (String(text ?? '').trim()) card.push({ label, text: String(text).trim() }); };
+    if (ex) {
+        const u = cardUpdate(d);
+        put('角色描述', u.description);
+        put('性格', u.personality);
+        put('场景', u.scenario);
+    } else {
+        put('角色描述', buildCharacter(d, { personaPlace }).description);
+    }
+    return {
+        before: on.filter((e) => Number(e.position) === 0).map(item),
+        card,
+        after: on.filter((e) => Number(e.position) !== 0).map(item),
+        green: all.filter((e) => !e.constant).map(item),
+    };
+}
+
+/** 把 sentContext 拼成一段文字 */
+export function contextText(c) {
+    return [...c.before, ...c.card, ...c.after].map((x) => x.text).join('\n\n');
 }

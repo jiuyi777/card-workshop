@@ -15,7 +15,7 @@ const replies = [];
 const flow = makeFlow({
     settings: () => settings,
     lib: () => lib,
-    llm: async (o) => { sent.push(o); assert.ok(replies.length, `多出来的请求：${o.user.slice(0, 40)}`); return replies.shift(); },
+    llm: async (o) => { sent.push(o); assert.ok(replies.length, `多出来的请求：${String(o.user ?? o.messages?.at(-1)?.content).slice(0, 40)}`); return replies.shift(); },
 });
 const d = { ...emptyDraft(), idea: '“最后抱我一次吧，在春天结束之前。”……可春天已在你眼前离去了。' };
 
@@ -307,6 +307,90 @@ await check('八股清理跳过基调与规则（规则清单本身列着禁用�
     assert.ok(!slots.find((x) => x.label === '世界观').rules);
 });
 
+await check('每一页的八股检查：每块文字都知道自己在哪一页；梗和简介只在单页检查里算', () => {
+    const slots = flow.textSlots(d);
+    assert.equal(slots.find((x) => x.label === '世界观').page, 'world');
+    assert.ok(slots.filter((x) => x.label.startsWith('人设')).every((x) => x.page === 'persona'));
+    assert.ok(slots.filter((x) => x.label.startsWith('开场白')).every((x) => x.page === 'greet'));
+    assert.equal(slots.find((x) => x.label === '模块·信物').page, 'step:c1');
+    assert.ok(!slots.some((x) => x.label.startsWith('梗·') || x.label.startsWith('简介')));
+    const all = flow.textSlots(d, { all: true });
+    assert.ok(all.some((x) => x.label.startsWith('梗·') && x.page === 'greet'));
+    const intro = all.filter((x) => x.page === 'intro');
+    assert.ok(intro.length && intro.every((x) => x.introPart));
+    intro[0].set('改过');
+    assert.equal(Object.values(d.intro.parts)[0] === '改过' || Object.values(d.intro.parts).includes('改过'), true);
+});
+
+await check('试玩：从开场白开始，发出去的设定和导入后一样，多轮对话，AI 扮 user，点评能指到页面', async () => {
+    const { sentContext } = await import('../src/assemble.js');
+    const gs = flow.playGreetings(d);
+    assert.ok(gs.length >= 2 && gs[0].route);
+    flow.playStart(d, 1);
+    assert.equal(d.play.messages.length, 1);
+    assert.equal(d.play.route, gs[1].route);
+    await assert.rejects(() => flow.playChar(d), /先写一句/);
+    d.play.messages.push({ role: 'user', text: '<user>看着{{char}}：你是谁？' });
+    d.play.userName = '林夏';
+    replies.push('他没回答。');
+    await flow.playChar(d);
+    const o = sent.at(-1);
+    assert.equal(o.stage, 'greeting', '用开场白预设');
+    assert.deepEqual(o.messages.map((m) => m.role), ['assistant', 'user'], '开场白是角色说的');
+    assert.ok(o.messages[1].content.includes('林夏看着迟春'), '名字替换');
+    assert.ok(o.system.includes(d.tone.trim().slice(0, 10)), '带上基调');
+    const ri = d.routes.findIndex((r) => r.name === d.play.route);
+    const other = d.routes.find((_, i) => i !== ri);
+    assert.ok(o.system.includes(d.routes[ri].info.trim().slice(0, 12)), '带上这条路线');
+    if (other?.info && other.info !== d.routes[ri].info) assert.ok(!o.system.includes(other.info.trim()), '不带别的路线');
+    assert.equal(d.play.messages.at(-1).text, '他没回答。');
+    // NPC 是绿灯：提到名字才发
+    const npc = d.npcs[0];
+    assert.ok(!sentContext(d, { activeRoute: ri, scan: '没提到' }).after.some((x) => x.label === `NPC·${npc.name}`));
+    assert.ok(sentContext(d, { activeRoute: ri, scan: `去找${npc.name}` }).after.some((x) => x.label === `NPC·${npc.name}`));
+    // AI 扮 user 跑两轮
+    d.play.style = '唱反调';
+    replies.push('（后退一步）我不认识你。', '他停住了。', '你走吧。', '他走了。');
+    await flow.playAuto(d, 2);
+    assert.equal(d.play.messages.length, 7);
+    assert.ok(sent.at(-4).user.includes('刁难'), '玩家风格带进去');
+    assert.ok(sent.at(-4).user.includes('他没回答。'), '带上前面的对话');
+    // 重来
+    replies.push('他回头了。');
+    await flow.playRedo(d);
+    assert.equal(d.play.messages.at(-1).text, '他回头了。');
+    assert.equal(d.play.messages.length, 7);
+    // 点评
+    replies.push(JSON.stringify({ score: 6, good: ['说话克制'], issues: [{ where: '第 3 条', problem: '只会接话', part: 'persona', name: '迟春', fix: '给他一件自己想做的事' }, { problem: '开场白没留钩子', part: 'greet', fix: '停在要回应的瞬间' }, { problem: 'x', part: '乱写', fix: 'y' }] }));
+    await flow.playReview(d);
+    assert.equal(d.play.review.score, 6);
+    assert.ok(sent.at(-1).user.includes('[第 3 条]'));
+    assert.deepEqual(flow.reviewTarget(d, d.play.review.issues[0]), { page: 'persona', key: 'persona:迟春' });
+    assert.deepEqual(flow.reviewTarget(d, d.play.review.issues[1]), { page: 'greet', key: `greet:${d.play.route}` });
+    assert.equal(d.play.review.issues[2].part, 'persona', '不认识的部分算人设');
+    // 试玩回复能扫八股，但不能清理
+    const ps = flow.textSlots(d, { all: true }).filter((x) => x.page === 'play');
+    assert.ok(ps.length && ps.every((x) => x.scanOnly));
+});
+
+await check('token：估算中文按字，酒馆分词器算完后用精确值', async () => {
+    const { estimateTokens, makeTokenCounter, fmtTokens } = await import('../src/tokens.js');
+    assert.equal(estimateTokens(''), 0);
+    assert.equal(estimateTokens('春天结束'), 4);
+    assert.equal(estimateTokens('abcdefgh'), 2);
+    let updated = 0;
+    const tc = makeTokenCounter(() => async (t) => t.length * 2, () => { updated++; });
+    const a = tc.count('春天');
+    assert.deepEqual(a, { n: 2, exact: false });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(tc.count('春天'), { n: 4, exact: true });
+    assert.ok(updated >= 1);
+    assert.equal(fmtTokens(tc.sum(['春天', ''])), '4 token');
+    assert.equal(fmtTokens({ n: 1234, exact: false }), '约 1,234 token');
+    const none = makeTokenCounter(() => undefined, () => {});
+    assert.equal(none.count('春天').exact, false, '没有分词器就一直估算');
+});
+
 await check('改已有的卡：读进来，按意见改，想新路线，只写新路线，写回时合并', async () => {
     const { cardUpdate, mergeWorld } = await import('../src/assemble.js');
     const card = { avatar: '黎曙.png', data: { name: '黎曙', description: '他是扒手团的孤儿。', personality: '冷', scenario: '', first_mes: '原开场', alternate_greetings: ['原开场2'], tags: ['BG', '扒手/盗贼', '奇怪标签'] } };
@@ -353,6 +437,8 @@ await check('改已有的卡：读进来，按意见改，想新路线，只写�
     assert.equal(by['扒手团'].content, '改过的扒手团');
     assert.equal(by['路线·孤儿时期'].disable, false);
     assert.equal(by['路线·重逢'].disable, true, '已经有开着的路线，新路线默认关');
+    const routeOrders = Object.values(merged.entries).filter((x) => x.comment.startsWith('路线·')).map((x) => x.order || 0);
+    assert.ok(by['路线·重逢'].order > (by['路线·孤儿时期'].order || 0) && new Set(routeOrders).size === routeOrders.length, '新路线的顺序号接在原来的路线后面，不重复');
     assert.ok(!by['人设·黎曙'], '人设在角色描述里，不进世界书');
     assert.equal(Object.keys(merged.entries).length, 4);
     assert.equal(world.entries[0].content, '领头叫老鬼', '不改传进来的原数据');
@@ -377,6 +463,79 @@ await check('改已有的卡：写卡工坊做的卡能认回各个步骤；没�
     const e2 = flow.loadCard({ avatar: 'b.png', data: { name: '迟春', character_book: worldToBook('x', made) } }, null, '');
     assert.equal(e2.tone, d.tone, '嵌在卡里的世界书也能读');
     assert.equal(e2.existing.hadWorld, false);
+});
+
+await check('AU：开新草稿（原卡不动）→ 提取内核 → 映射表 → AU 人设带内核和映射 → 一致性检查 → 按结果修', async () => {
+    const card = { avatar: '黎曙.png', data: { name: '黎曙', description: '他是扒手团的孤儿，只信自己，但对一起挨过饿的人放不下。', first_mes: '原开场', tags: ['BG', '1v1', '古言', '扒手/盗贼'] } };
+    const a = flow.auStart(card, { entries: { 0: { uid: 0, comment: '扒手团', key: [], content: '领头叫老鬼', constant: true } } }, 'x');
+    assert.equal(a.name, '黎曙（AU）');
+    assert.equal(a.existing, undefined, 'AU 是新卡，不是改原卡');
+    assert.deepEqual(a.personas.map((p) => [p.name, p.text]), [['黎曙', '']]);
+    assert.deepEqual(a.tags.map((t) => t.name), ['BG', '1v1'], '题材、原型这些原作标签不带过来');
+    await assert.rejects(() => flow.auMap(a), /AU 设定/);
+
+    replies.push('<<<内核:黎曙>>>\n矛盾轴: 只信自己 ↔ 放不下一起挨过饿的人\n<<<外壳>>>\n- 扒手团\n- 古代');
+    await flow.auCore(a);
+    assert.ok(sent.at(-1).user.includes('只信自己') && sent.at(-1).user.includes('领头叫老鬼'), '原卡全文发给 AI');
+    assert.ok(a.au.core[0].text.includes('放不下'));
+    assert.ok(a.au.shell.includes('扒手团'));
+
+    a.idea = '现代都市，他是外卖骑手';
+    replies.push('原：扒手团 → AU：城中村的外卖站｜一起熬夜跑单的人就是一起挨过饿的人');
+    await flow.auMap(a);
+    const mu = sent.at(-1).user;
+    assert.ok(mu.includes('外卖骑手') && mu.includes('放不下') && mu.includes('- 扒手团'));
+    assert.ok(a.au.map.includes('外卖站'));
+
+    replies.push('<<<概要>>>\n外卖骑手。\n<<<人设>>>\n<黎曙>\n只信自己。他会把人拉到身后宣示主权。扒手团的规矩他还记得。\n</黎曙>');
+    await flow.persona(a, '黎曙');
+    const pu = sent.at(-1).user;
+    assert.ok(pu.includes('【角色内核】') && pu.includes('【映射表】') && pu.includes('原作的地名、组织、道具、事件不要出现'), 'AU 人设的提示词里有内核和映射表');
+    assert.ok(!pu.includes('领头叫老鬼'), '生成 AU 人设时不给原卡全文');
+
+    replies.push(JSON.stringify({ items: [{ core: '只信自己', verdict: '保留' }, { core: '放不下一起挨过饿的人', verdict: '丢了', where: '没写到', fix: '写他会替站里的新人兜底' }], leftovers: ['扒手团'] }));
+    const c = await flow.auCheck(a, '黎曙');
+    assert.equal(c.items.filter((x) => x.verdict !== '保留').length, 1);
+    assert.deepEqual(c.leftovers, ['扒手团']);
+    assert.ok(sent.at(-1).user.includes('放不下') && sent.at(-1).user.includes('宣示主权'));
+
+    replies.push('<黎曙>\n只信自己，但会替站里的新人兜底。\n</黎曙>');
+    await flow.auFix(a, '黎曙');
+    const fu = sent.at(-1).user;
+    assert.ok(fu.includes('写他会替站里的新人兜底') && fu.includes('原作世界的残留：扒手团'), '偏离和残留变成修改意见');
+    assert.ok(a.personas[0].text.includes('兜底'));
+    assert.equal(a.au.checks['黎曙'].fixed, true);
+
+    // 世界观等后续步骤也拿到 AU 摘要
+    replies.push('<世界观>\n城中村\n</世界观>');
+    await flow.world(a);
+    assert.ok(sent.at(-1).user.includes('外卖骑手') && sent.at(-1).user.includes('【角色内核】'));
+    // 内核和映射表能换回上一版
+    replies.push('原：扒手团 → AU：快递站');
+    await flow.auMap(a);
+    flow.restore(a, 'au:map');
+    assert.ok(a.au.map.includes('外卖站'));
+});
+
+await check('展开经历：单独写经历，合并进人设的 life_story；经历太少会被质检标出来', async () => {
+    const { lifeStoryStats, thinLifeStory, scanCard } = await import('../src/checks.js');
+    const e = { ...emptyDraft(), personas: [{ name: '阿九', keys: [], overview: '', text: '<阿九>\n角色详情:\n  阿九:\n    identity: 扒手\n    life_story:\n      - 进了扒手团 → 只信自己\n    current_state:\n      - 在城里\n</阿九>' }] };
+    assert.ok(thinLifeStory(e.personas[0].text));
+    assert.ok(scanCard(e.personas[0].text, 'persona').some((i) => i.type === 'story'));
+    replies.push('好的\nlife_story:\n  - 时期: 七八岁\n    发生了什么: 冬天被领头扔在桥下，是一起挨饿的小哥把半块饼塞给他，第二天小哥被打断了手。\n    留下了什么: 欠了的要还，也怕再欠谁\n    现在: 有人对他好，他先算自己欠了多少\n  - 时期: 十二岁\n    发生了什么: 他第一次偷到大户人家的东西，交给领头时被扣下一半，他没吭声，夜里把那一半又偷了回来。\n    留下了什么: 吃亏不当场说，但一定讨回来\n    现在: 被人占便宜时脸上不显，过几天才动手\n  - 时期: 十五岁\n    发生了什么: 他决定离开扒手团，走到城门口被〔user〕拽住了手，他骂了一路，最后还是带上了。\n    留下了什么: 走不掉，也不想真走掉\n    现在: 想走的时候会先回头看〔user〕在不在');
+    const st = await flow.backstory(e, '阿九');
+    const u = sent.at(-1).user;
+    assert.ok(u.includes('为角色「阿九」写过去的经历') && u.includes('只信自己') && u.includes('4–7'));
+    assert.equal(st.count, 3);
+    const t = e.personas[0].text;
+    assert.ok(t.includes('      - 时期: 七八岁') && t.includes('        发生了什么: 冬天'), '缩进对齐人设');
+    assert.ok(!t.includes('进了扒手团 → 只信自己'), '原来那句被换掉');
+    assert.ok(t.includes('    current_state:') && t.endsWith('</阿九>'));
+    assert.ok(!thinLifeStory(t));
+    flow.restore(e, 'persona:阿九');
+    assert.ok(e.personas[0].text.includes('进了扒手团 → 只信自己'), '能换回上一版');
+    replies.push('没按格式');
+    await assert.rejects(() => flow.backstory(e, '阿九'), /没按格式/);
 });
 
 assert.equal(replies.length, 0);

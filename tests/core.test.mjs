@@ -179,6 +179,7 @@ await check('组装：桶型结构、灯色、顺序、只开第一条路线', (
     assert.equal(by['人设·黎曙'].constant, false);
     assert.deepEqual(by['人设·黎曙'].key, ['黎曙', '阿曙']);
     assert.ok(by['人设·黎曙'].order > by['世界观'].order && by['人设·黎曙'].order > by['人设概要'].order);
+    assert.deepEqual(es.map((e) => e.order), [1, 2, 3, 4, 5, 6, 7, 8, 9], '顺序号连着编，不跳');
     assert.equal(by['路线·孤儿时期'].disable, false);
     assert.equal(by['路线·重逢'].disable, true);
     assert.equal(by['模块·信物'].constant, false);
