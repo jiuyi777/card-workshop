@@ -1,0 +1,12 @@
+{
+  "name": "card-workshop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/core.test.mjs && node tests/flow.test.mjs && node tests/bridge.test.mjs ../../jiuyi777/bagu-cleaner/engine.js && node tests/ui.test.mjs"
+  },
+  "devDependencies": {
+    "jquery": "^3.7.1",
+    "jsdom": "^25.0.0"
+  }
+}

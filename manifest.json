@@ -1,0 +1,11 @@
+{
+    "display_name": "写卡工坊",
+    "loading_order": 110,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "",
+    "version": "0.1.0",
+    "homePage": ""
+}

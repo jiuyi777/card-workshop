@@ -1,0 +1,58 @@
+.cw { text-align: left; display: flex; flex-direction: column; gap: 10px; font-size: 0.95em; }
+.cw-top { display: flex; flex-direction: column; gap: 6px; position: sticky; top: 0; z-index: 2; padding: 6px 0; background: var(--SmartThemeBlurTintColor); backdrop-filter: blur(var(--SmartThemeBlurStrength, 6px)); }
+.cw-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0; }
+.cw-row .menu_button, .cw-btn { margin: 0; white-space: nowrap; width: auto; flex: 0 0 auto; padding: 4px 10px; }
+.cw-grow { flex: 1 1 140px; min-width: 0; }
+.cw-end { justify-content: flex-end; }
+.cw-primary { font-weight: bold; padding: 8px 16px !important; border-color: var(--SmartThemeQuoteColor) !important; }
+.cw-btn.disabled, .cw .disabled { opacity: 0.4; pointer-events: none; }
+.cw-status { min-height: 1.2em; font-size: 0.9em; }
+.cw-sec { border: 1px solid var(--SmartThemeBorderColor); border-radius: 8px; padding: 6px 10px; }
+.cw-sec > summary.cw-title { cursor: pointer; font-weight: bold; padding: 2px 0; }
+.cw-sec[open] > summary.cw-title { margin-bottom: 6px; }
+.cw-body { display: flex; flex-direction: column; gap: 6px; }
+.cw-sub { font-weight: bold; margin-top: 6px; }
+.cw-dim { opacity: 0.65; }
+.cw-small { font-size: 0.85em; }
+.cw-err { color: #e06060; }
+.cw-ta { width: 100%; min-height: 4em; line-height: 1.6; field-sizing: content; max-height: 60vh; }
+.cw-in { width: 100%; margin: 0; }
+.cw-row .cw-in { width: auto; }
+.cw-card { border: 1px solid var(--SmartThemeBorderColor); border-radius: 8px; padding: 8px 10px; background: var(--black30a); display: flex; flex-direction: column; gap: 4px; }
+.cw-card.picked { border-color: var(--SmartThemeQuoteColor); box-shadow: 0 0 0 1px var(--SmartThemeQuoteColor) inset; }
+.cw-ctitle { font-weight: bold; font-size: 1.05em; }
+.cw-box { border-left: 3px solid var(--SmartThemeQuoteColor); padding: 4px 8px; display: flex; flex-direction: column; gap: 4px; }
+.cw-chips, .cw-opts { display: flex; flex-wrap: wrap; gap: 4px; }
+.cw-chip, .cw-opt { cursor: pointer; font-size: 0.85em; padding: 2px 8px; border-radius: 12px; border: 1px solid var(--SmartThemeBorderColor); user-select: none; display: inline-flex; align-items: center; gap: 3px; }
+.cw-chip input { margin: 0; }
+.cw-chip.on, .cw-opt.on { background: color-mix(in srgb, var(--SmartThemeQuoteColor) 30%, transparent); border-color: var(--SmartThemeQuoteColor); }
+.cw-chip.tag.on.src-ai { border-style: dashed; }
+.cw-chip.tag.on.src-guess { border-style: dotted; }
+.cw-opt { border-radius: 6px; padding: 4px 8px; font-size: 0.9em; }
+.cw-q { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; }
+.cw-qt { font-weight: bold; }
+.cw-mini > summary { cursor: pointer; font-size: 0.9em; }
+.cw-mini[open] > summary { margin-bottom: 4px; }
+.cw-badge { font-size: 0.85em; padding: 1px 8px; border-radius: 4px; border: 1px solid var(--SmartThemeBorderColor); }
+.cw-badge.ok { border-color: rgba(80, 160, 110, 0.8); }
+.cw-issues { display: flex; flex-wrap: wrap; gap: 4px; }
+.cw-issue { font-size: 0.82em; padding: 1px 6px; border-radius: 4px; word-break: break-all; }
+.cw-issue.error { background: rgba(210, 70, 70, 0.3); }
+.cw-issue.warn { background: rgba(220, 150, 60, 0.28); }
+.cw-issue.info { background: rgba(120, 140, 200, 0.22); }
+.cw-ov { padding: 4px 0; border-bottom: 1px dashed var(--SmartThemeBorderColor); }
+.cw-ov:last-child { border-bottom: 0; }
+.cw ul { margin: 2px 0 2px 1.2em; padding: 0; }
+.cw-settings label { display: block; margin: 4px 0; }
+.cw-settings label.checkbox_label { display: flex; align-items: flex-start; gap: 6px; }
+.cw-settings label.checkbox_label input { flex: 0 0 auto; margin-top: 3px; }
+.cw-settings select, .cw-settings textarea, .cw-settings input.text_pole { width: 100%; box-sizing: border-box; }
+.cw-settings input[type="number"], .cw-settings input.cw-inline { width: 6em; display: inline-block; }
+.cw-settings .cw-open { width: 100%; white-space: nowrap; display: flex; justify-content: center; gap: 6px; margin: 6px 0; }
+.cw-settings h4 { margin: 12px 0 4px; }
+.cw-settings .cw-card { margin: 6px 0; }
+@media (max-width: 600px) {
+    .cw { font-size: 0.92em; }
+    .cw-sec { padding: 6px; }
+    .cw-card { padding: 6px; }
+}
