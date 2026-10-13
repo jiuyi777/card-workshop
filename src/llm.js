@@ -41,11 +41,45 @@ export function presetMessages(name) {
     }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let lastAt = 0;
+
+/** 429 / 频率限制 / 配额 */
+export function isRateLimit(e) {
+    const msg = [e?.message, e?.cause?.message, e?.status, e?.cause?.status, String(e ?? '')].filter(Boolean).join(' ');
+    return /429|too many|rate.?limit|频率|过于频繁|quota|resource.?exhausted|overloaded|529/i.test(msg);
+}
+
 /**
- * 调一次 API。
- * @param {{system:string,user:string,stage:'card'|'greeting',temperature?:number,settings:any,userToken?:string}} o
+ * 调一次 API。两次调用之间至少隔 settings.minInterval 秒；遇到 429 自动等一会儿重试（最多 3 次）。
+ * @param {{system:string,user:string,stage:'card'|'greeting',temperature?:number,settings:any,userToken?:string,onWait?:(s:number)=>void,aborted?:()=>boolean}} o
  */
-export async function callLLM({ system, user, stage = 'card', temperature, settings, userToken = '<user>' }) {
+export async function callLLM(o) {
+    const gap = Math.max(0, Number(o.settings?.minInterval ?? 3)) * 1000;
+    const waits = o.settings?.retryWaits ?? [15, 30, 60];
+    for (let attempt = 0; ; attempt++) {
+        const left = lastAt + gap - Date.now();
+        if (left > 0) await sleep(left);
+        if (o.aborted?.()) throw new Error('已停止');
+        lastAt = Date.now();
+        try {
+            return await callOnce(o);
+        } catch (e) {
+            if (!isRateLimit(e) || attempt >= waits.length || o.aborted?.()) {
+                if (isRateLimit(e)) throw new Error(`API 一直返回 429（请求太频繁）。等一会儿再试，或者在设置里把“两次调用间隔”调大。`);
+                throw e;
+            }
+            const sec = waits[attempt];
+            for (let t = sec; t > 0; t--) {
+                if (o.aborted?.()) throw new Error('已停止');
+                o.onWait?.(t);
+                await sleep(1000);
+            }
+        }
+    }
+}
+
+async function callOnce({ system, user, stage = 'card', temperature, settings, userToken = '<user>' }) {
     const c = ctx();
     const presetName = stage === 'greeting' ? settings.presetGreeting : settings.presetCard;
     const pre = presetMessages(presetName);

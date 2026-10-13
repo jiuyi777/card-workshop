@@ -86,6 +86,14 @@ await check('宏保护：<user>/{{user}}/{{char}} 发送前换成占位符，收
     assert.equal(extractTagged('前言<黎曙>\na: 1\n</黎曙>后记', '黎曙'), '<黎曙>\na: 1\n</黎曙>');
 });
 
+await check('直接删程度副词：不误伤十分钟、七十分、非常时期', async () => {
+    const { stripWords, findWords } = await import('../src/parse.js');
+    const w = DEFAULT_RULES['直接删'];
+    assert.equal(stripWords('他极其冷静，带着无比的愤怒，美丽无比。', w), '他冷静，带着愤怒，美丽。');
+    assert.equal(stripWords('等了十分钟，考了七十分，非常时期，万分之一', w), '等了十分钟，考了七十分，非常时期，万分之一');
+    assert.deepEqual(findWords('他的占有欲和执念', DEFAULT_RULES['禁用词']), ['执念', '占有欲']);
+});
+
 await check('本地质检：小动作、数字、断言、裸禁令、标签没解释', () => {
     const persona = `<黎曙>
 appearance:
@@ -155,7 +163,14 @@ await check('组装：桶型结构、灯色、顺序、只开第一条路线', (
     d.npcs = [{ name: '老周', keys: ['周叔'], content: '<老周>…</老周>' }];
     d.routes = [{ name: '孤儿时期', info: '<玩家信息>A</玩家信息>' }, { name: '重逢', info: '<玩家信息>B</玩家信息>' }];
     d.free = [{ name: '信物', content: '<信物>…</信物>', light: 'green', keys: ['怀表'], position: 'before' }, { name: '空', content: '  ' }];
-    const es = buildEntries(d);
+    const blue = buildEntries(d);
+    assert.ok(!blue.some((e) => e.comment === '人设概要'), '默认人设蓝灯，不再单独放概要');
+    assert.equal(blue.find((e) => e.comment === '人设·黎曙').constant, true);
+    const inDesc = buildEntries(d, { personaPlace: 'description' });
+    assert.ok(!inDesc.some((e) => e.comment.startsWith('人设')), '放进角色描述时世界书里没有人设');
+    assert.equal(buildCharacter(d, { personaPlace: 'description' }).description, '<黎曙>…</黎曙>');
+    assert.equal(buildCharacter(d).description, '');
+    const es = buildEntries(d, { personaPlace: 'green' });
     assert.deepEqual(es.map((e) => e.comment), ['基调与规则', '世界观', '世界观·扒手团', '人设概要', '人设·黎曙', 'NPC·老周', '路线·孤儿时期', '路线·重逢', '模块·信物']);
     const by = Object.fromEntries(es.map((e) => [e.comment, e]));
     assert.equal(by['基调与规则'].position, 0);
@@ -168,7 +183,6 @@ await check('组装：桶型结构、灯色、顺序、只开第一条路线', (
     assert.equal(by['路线·重逢'].disable, true);
     assert.equal(by['模块·信物'].constant, false);
     assert.equal(by['模块·信物'].position, 0);
-    assert.equal(buildEntries(d, { personaBlue: true }).find((e) => e.comment === '人设·黎曙').constant, true);
     const wd = toWorldData(es);
     assert.equal(Object.keys(wd.entries).length, 9);
     assert.equal(wd.entries[4].uid, 4);

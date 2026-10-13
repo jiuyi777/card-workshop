@@ -34,7 +34,7 @@ const worlds = { 已有的书: { entries: {} } };
 const requests = [];
 const prompts = [];
 const ctx = {
-    extensionSettings: { baguCleaner: { userWords: '' }, connectionManager: { profiles: [] } },
+    extensionSettings: { baguCleaner: { userWords: '' }, connectionManager: { profiles: [] }, cardWorkshop: { minInterval: 0 } },
     saveSettingsDebounced() {},
     POPUP_TYPE,
     async callGenericPopup(content, type) {
@@ -76,6 +76,7 @@ function respond(messages) {
     if (u.includes('帮作者想清楚')) return JSON.stringify({ chars: [{ name: '迟春', questions: [{ q: '他为什么宁愿消失也要这个拥抱？', options: ['锚', '告别', '赌注'] }] }] });
     if (u.includes('为角色「迟春」写人设')) return '<<<概要>>>\n他是春天本身，〔user〕是唯一记得他的人。\n<<<人设>>>\n<迟春>\n角色详情:\n  迟春:\n    行为指导:\n      性格解释与行为表现:\n        - 吃醋时把人拉到身后宣示主权\n</迟春>';
     if (u.includes('只给你一个角色的类型标签')) return JSON.stringify({ scenes: [{ scene: '吃醋', behavior: '他会把人拉到身后宣示主权', line: '你是我的' }], traits: [] });
+    if (u.includes('找出人设里本质上就是刻板写法的句子')) return JSON.stringify({ overlaps: [{ card: '吃醋时把人拉到身后宣示主权', stereotype: '他会把人拉到身后宣示主权', why: '一样' }] });
     if (u.includes('和“这类角色的刻板写法”撞了')) return '<迟春>\n角色详情:\n  迟春:\n    行为指导:\n      性格解释与行为表现:\n        - 吃醋时把对方送他的东西还回去\n</迟春>';
     if (u.includes('为这张卡写世界观')) return '<世界观>\n规则: 春天结束，迟春散去\n</世界观>';
     if (u.includes('为这张卡写 NPC')) return '<<<NPC:守庙人|庙祝>>>\n<守庙人>\n功能: 提供信息\n</守庙人>';
@@ -127,14 +128,14 @@ const title = () => cw().find('.cw-ptitle').text();
 
 await check('扩展加载：魔棒菜单和设置面板都有，提示词编辑不在设置面板里', () => {
     assert.ok($('#cw_menu_button').text().includes('写卡工坊'));
-    assert.ok($('.cw-settings').text().includes('目录 → 提示词'));
+    assert.ok($('.cw-settings').text().includes('“设置”和“提示词”'));
     assert.equal($('.cw-settings .cw-step-ta').length, 0);
 });
 
 await check('打开是目录：每一步一个入口，提示“下一步”', async () => {
     $('#cw_menu_button').trigger('click');
     await until(() => cw().length);
-    assert.equal(cw().find('.cw-tile').length, 12, '11 步 + 提示词');
+    assert.equal(cw().find('.cw-tile').length, 13, '11 步 + 设置 + 提示词');
     assert.ok(cw().find('.cw-next').text().includes('一句话构想'));
     assert.equal(cw().find('textarea[data-bind="idea"]').length, 0, '目录页不堆内容');
 });
@@ -208,6 +209,41 @@ await check('一键出卡（在目录）：跑完后跳到质检页', async () =
     assert.ok(toasts.every((t) => t[0] !== 'err'), JSON.stringify(toasts));
 });
 
+await check('设置页：在插件里改 API 间隔和人设位置', async () => {
+    await go('settings');
+    assert.ok(title().includes('设置'));
+    assert.ok(cw().find('[data-set="presetGreeting"]').length && cw().find('[data-set="apiProfile"]').length);
+    const sel = cw().find('[data-set="personaPlace"]').get(0);
+    assert.equal(sel.value, 'blue');
+    sel.value = 'green'; sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+    assert.equal(ctx.extensionSettings.cardWorkshop.personaPlace, 'green');
+    sel.value = 'blue'; sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+});
+
+await check('人设页：显示禁用词，计数显示调用次数', async () => {
+    await go('persona');
+    type('textarea[data-bind="personas.0.text"]', draft().personas[0].text + '\n    补充: 他的执念很深');
+    await go('home'); await go('persona');
+    assert.ok(cw().find('.cw-err').text().includes('执念'));
+    assert.match(cw().find('.cw-meta').text(), /共 \d+ 次/);
+    draft().personas[0].text = draft().personas[0].text.replace('\n    补充: 他的执念很深', '');
+});
+
+await check('修改意见 + 换回上一版（基调页）；开场白页能直接选预设', async () => {
+    await go('tone');
+    const before = draft().tone;
+    type('input[data-bind="feedback.tone"]', '冲突再尖锐一点');
+    assert.equal(draft().feedback.tone, '冲突再尖锐一点');
+    await click('[data-act="tone"]');
+    assert.ok(prompts.at(-1).includes('冲突再尖锐一点') && prompts.at(-1).includes('【上一版】'));
+    assert.equal(cw().find('input[data-bind="feedback.tone"]').val(), '', '用完清空');
+    await click('[data-act="restore"][data-key="tone"]');
+    assert.equal(draft().tone, before);
+    await go('greet');
+    assert.ok(cw().find('[data-set="presetGreeting"]').length, '开场白页上就能选预设');
+    assert.ok(cw().find('input[data-bind="feedback.greet:第一个春天"]').length);
+});
+
 await check('手动编辑：改人设文本、加一个自由模块', async () => {
     await go('persona');
     type('textarea[data-bind="personas.0.overview"]', '他是春天本身。');
@@ -228,8 +264,8 @@ await check('导入酒馆：世界书不重名、条目按桶型排、角色卡�
     const es = Object.values(book.entries);
     const by = Object.fromEntries(es.map((e) => [e.comment, e]));
     assert.equal(by['基调与规则'].position, 0);
-    assert.equal(by['人设概要'].constant, true);
-    assert.equal(by['人设·迟春'].constant, false);
+    assert.ok(!by['人设概要'], '默认人设蓝灯，不单独放概要');
+    assert.equal(by['人设·迟春'].constant, true);
     assert.deepEqual(by['人设·迟春'].key, ['迟春']);
     assert.equal(by['路线·第一个春天'].disable, false);
     assert.equal(by['路线·失去之后'].disable, true);

@@ -77,7 +77,7 @@ await check('预设：只取全局顺序里启用的、有内容的条目', () =
 
 await check('API：当前连接走 generateRaw，宏被保护，返回时换回 <user>', async () => {
     sent.length = 0;
-    const out = await callLLM({ system: '系统', user: '<user>和{{char}}', stage: 'greeting', settings: { presetGreeting: '文风预设' } });
+    const out = await callLLM({ system: '系统', user: '<user>和{{char}}', stage: 'greeting', settings: { presetGreeting: '文风预设', minInterval: 0 } });
     assert.equal(out, '<user>看着{{char}}');
     const msgs = sent[0].prompt;
     assert.equal(sent[0].via, 'raw');
@@ -87,7 +87,7 @@ await check('API：当前连接走 generateRaw，宏被保护，返回时换回 
 
 await check('API：写卡阶段不带开场白预设；连接配置文件走 sendRequest 并带温度', async () => {
     sent.length = 0;
-    const out = await callLLM({ system: 's', user: 'u', stage: 'card', temperature: 0.9, settings: { apiProfile: 'p1', presetGreeting: '文风预设', useTemperature: true }, userToken: '{{user}}' });
+    const out = await callLLM({ system: 's', user: 'u', stage: 'card', temperature: 0.9, settings: { apiProfile: 'p1', presetGreeting: '文风预设', useTemperature: true, minInterval: 0 }, userToken: '{{user}}' });
     assert.equal(out, '好的，{{user}}');
     assert.equal(sent[0].via, 'profile');
     assert.equal(sent[0].prompt.length, 2);
@@ -97,7 +97,42 @@ await check('API：写卡阶段不带开场白预设；连接配置文件走 sen
 
 await check('API：空回复报错', async () => {
     ctx.generateRaw = async () => '   ';
-    await assert.rejects(() => callLLM({ system: 's', user: 'u', settings: {} }), /空内容/);
+    await assert.rejects(() => callLLM({ system: 's', user: 'u', settings: { minInterval: 0 } }), /空内容/);
+});
+
+await check('API：遇到 429 自动等待重试，提示倒计时；一直 429 给出明白的错误', async () => {
+    const { callLLM: call } = await import('../src/llm.js');
+    let n = 0;
+    const waited = [];
+    ctx.generateRaw = async () => { n++; if (n < 3) throw new Error('Got response status 429 Too Many Requests'); return '好了'; };
+    const out = await call({ system: 's', user: 'u', settings: { minInterval: 0, retryWaits: [1, 1] }, onWait: (sec) => waited.push(sec) });
+    assert.equal(out, '好了');
+    assert.equal(n, 3);
+    assert.deepEqual(waited, [1, 1]);
+    ctx.generateRaw = async () => { throw new Error('429'); };
+    await assert.rejects(() => call({ system: 's', user: 'u', settings: { minInterval: 0, retryWaits: [0] } }), /一直返回 429/);
+    ctx.generateRaw = async () => { throw new Error('别的错误'); };
+    await assert.rejects(() => call({ system: 's', user: 'u', settings: { minInterval: 0, retryWaits: [0] } }), /别的错误/);
+});
+
+await check('API：两次调用之间按设置间隔', async () => {
+    const { callLLM: call } = await import('../src/llm.js');
+    const times = [];
+    ctx.generateRaw = async () => { times.push(Date.now()); return 'x'; };
+    await call({ system: 's', user: 'u', settings: { minInterval: 0.3 } });
+    await call({ system: 's', user: 'u', settings: { minInterval: 0.3 } });
+    assert.ok(times[1] - times[0] >= 280, `间隔 ${times[1] - times[0]}ms`);
+});
+
+await check('八股清理：整批格式错了只整批重来，单句重做最多 3 次', async () => {
+    const opts = baguOptions({ baguCleaner: { userWords: '低笑' } });
+    const text = Array.from({ length: 8 }, (_, i) => `他${i}低笑。`).join('');
+    let calls = 0;
+    const out = await baguRewrite(text, '人设', opts, async () => { calls++; return '不是 JSON'; });
+    assert.equal(calls, 2 + 3, '整批 2 次 + 单句 3 次');
+    assert.equal(out.failed.length, 5, '超过上限的 5 句直接保留原句');
+    const ex = baguOptions({ baguCleaner: { userWords: '' } }, ['执念']);
+    assert.ok(baguScan('他的执念', ex).must >= 1, '写卡工坊的禁用词也算必改');
 });
 
 console.log(`\n${passed} passed`);

@@ -1,7 +1,7 @@
 // 写卡工坊 · 各步骤的执行逻辑（不依赖 DOM，API 调用通过 call 注入，便于测试）
 
 import { DEFAULT_PROMPTS, DEFAULT_RULES, PERSONA_TEMPLATE, SYSTEM_CARD, SYSTEM_PROSE, STEP_INFO, fill, ruleVars } from './prompts.js';
-import { parseJSON, splitBlocks, blockOf, extractTagged, clip } from './parse.js';
+import { parseJSON, splitBlocks, blockOf, extractTagged, clip, stripWords, wordList, findWords } from './parse.js';
 import { matchTags, sanitizeTags, toggleTag, tagsText, tagValue, libraryText, findTag, rollDice, PLATFORM_STYLE, dimOf } from './tags.js';
 import { conceptText, answersText, overviewsText, routesText, composeIntro, parseTitles, orderedGreetings } from './assemble.js';
 import { scanCard, predictOverlap, crossCompare } from './checks.js';
@@ -60,22 +60,110 @@ export function makeFlow(deps) {
         };
     }
 
-    async function run(id, d, extra = {}, { stage, system } = {}) {
+    /** 禁用词（去掉用户选了的标签名，比如选了“神明”就不禁“神明”） */
+    const banned = (d) => {
+        const tags = new Set((d.tags ?? []).map((t) => t.name));
+        return wordList(rules()['禁用词']).filter((w) => !tags.has(w));
+    };
+    const withBan = (system, d) => {
+        const list = banned(d);
+        return list.length ? `${system}\n下面这些词一律不要出现，换成具体、平实的写法：${list.join('、')}` : system;
+    };
+    /** 生成的正文直接删掉程度副词（不调 API） */
+    const strip = (text) => stripWords(text, rules()['直接删']);
+
+    // ───── 修改意见 / 上一版 / 截断 ─────
+    const feedbackOf = (d, key) => str(d.feedback?.[key]);
+
+    /** 重写前把旧内容存进历史（每块最多 5 版） */
+    function remember(d, key, value) {
+        const empty = value == null || (typeof value === 'string' ? !value.trim() : Array.isArray(value) ? !value.length : !Object.values(value).some((v) => (typeof v === 'string' ? v.trim() : Array.isArray(v) ? v.length : v)));
+        if (empty) return;
+        d.history ??= {};
+        const list = (d.history[key] ??= []);
+        list.push(structuredClone(value));
+        if (list.length > 5) list.shift();
+    }
+
+    /** 每一块内容怎么读、怎么写回（给“换回上一版”用） */
+    function slotOf(d, key) {
+        const [kind, ...rest] = key.split(':');
+        const name = rest.join(':');
+        const persona = () => d.personas.find((x) => x.name === name);
+        const fr = () => d.free.find((x) => x.name === name);
+        return {
+            idea: { get: () => ({ concepts: d.concepts, pick: d.pick }), set: (v) => { d.concepts = v.concepts; d.pick = v.pick; } },
+            persona: { get: () => ({ overview: persona()?.overview ?? '', text: persona()?.text ?? '' }), set: (v) => { const p = persona(); if (p) Object.assign(p, v); } },
+            world: { get: () => d.world, set: (v) => { d.world = v; } },
+            npc: { get: () => d.npcs, set: (v) => { d.npcs = v; } },
+            routes: { get: () => d.routes.map((r) => r.info), set: (v) => { d.routes.forEach((r, i) => { r.info = v[i] ?? r.info; }); } },
+            tone: { get: () => d.tone, set: (v) => { d.tone = v; } },
+            greet: { get: () => d.greetings.filter((g) => g.route === name).map((g) => g.text), set: (v) => { d.greetings = [...d.greetings.filter((g) => g.route !== name), ...v.map((text) => ({ route: name, text }))]; } },
+            free: { get: () => fr()?.content ?? '', set: (v) => { const f = fr(); if (f) f.content = v; } },
+            intro: { get: () => d.intro, set: (v) => { d.intro = v; } },
+        }[kind];
+    }
+
+    /** 换回上一版：当前版本放回历史最前面，可以一直点着轮换 */
+    function restore(d, key) {
+        const list = d.history?.[key];
+        const slot = slotOf(d, key);
+        if (!list?.length || !slot) return false;
+        const prev = list.pop();
+        list.unshift(structuredClone(slot.get()));
+        slot.set(prev);
+        if (d.truncated) delete d.truncated[key];
+        return true;
+    }
+
+    /** 回复里没有收尾标签 = 被截断了，自动续写一次 */
+    async function complete(out, close, user, sys, st, temp) {
+        if (!close || out.includes(close)) return { out, cut: false };
+        progress('回复被截断了，自动续写…');
+        const more = await deps.llm({
+            system: sys,
+            user: `${user}\n\n【你上一次的回答在这里断掉了。从断掉的地方直接接着写，不要重复已经写的内容，不要解释】\n……${out.slice(-1500)}`,
+            stage: st,
+            temperature: temp,
+        });
+        check();
+        const joined = out + more.replace(/^\s*……/, '');
+        return { out: joined, cut: !joined.includes(close) };
+    }
+
+    /**
+     * @param {{stage?:string, system?:string, json?:boolean, key?:string, prev?:string, close?:string}} opt
+     * key：这一块的名字（修改意见、上一版、截断提醒都按它记）；prev：上一版内容，有修改意见时一起发给 AI；close：收尾标签，用来判断有没有被截断
+     */
+    async function run(id, d, extra = {}, { stage, system, json = false, key, prev, close } = {}) {
         check();
         const info = STEP_INFO[id] ?? { name: id, stage: 'card', temp: 0.8 };
         progress(`${info.name}…`);
-        const user = fill(promptOf(id), { ...baseVars(d), ...extra });
+        let user = fill(promptOf(id), { ...baseVars(d), ...extra });
+        const fb = key ? feedbackOf(d, key) : '';
+        if (fb) {
+            user += `\n\n【作者对上一版的修改意见，必须优先满足】\n${fb}`;
+            if (str(prev)) user += `\n【上一版】（按意见改，没提到的好的部分可以保留）\n${clip(prev, 3000)}`;
+        }
         const st = stage ?? info.stage;
-        const out = await deps.llm({ system: system ?? (st === 'greeting' ? SYSTEM_PROSE : SYSTEM_CARD), user, stage: st, temperature: info.temp });
+        const sys = withBan(system ?? (st === 'greeting' ? SYSTEM_PROSE : SYSTEM_CARD), d);
+        let out = await deps.llm({ system: sys, user, stage: st, temperature: info.temp });
         check();
-        return out;
+        if (key) {
+            const r = await complete(out, close, user, sys, st, info.temp);
+            out = r.out;
+            d.truncated ??= {};
+            if (r.cut) d.truncated[key] = true; else delete d.truncated[key];
+            if (fb) d.feedback[key] = '';
+        }
+        return json ? out : strip(out);
     }
 
     // ───── 0. 灵感 ─────
     async function inspire(d) {
         d.dice = rollDice(L(), d.diceLock ?? {});
         const dice = Object.entries(d.dice).map(([k, v]) => `${dimOf(L(), k)?.name ?? k}：${v}`).join('；');
-        const j = parseJSON(await run('inspire', d, { dice }));
+        const j = parseJSON(await run('inspire', d, { dice }, { json: true }));
         d.inspire = arr(j.questions).slice(0, 4).map((q) => ({ q: str(q.q), options: arr(q.options).map(str).filter(Boolean).slice(0, 4), answer: '' }));
         return d;
     }
@@ -109,7 +197,8 @@ export function makeFlow(deps) {
         const j = parseJSON(await run('idea', d, {
             matched: hits.map((h) => h.name).join('、') || '（无）',
             tagLibrary: libraryText(lib),
-        }));
+        }, { json: true, key: 'idea', prev: (d.concepts ?? []).map((c) => c.title).join('\n') }));
+        remember(d, 'idea', { concepts: d.concepts, pick: d.pick });
         d.concepts = arr(j.concepts).slice(0, 3).map(normalizeConcept);
         if (!d.concepts.length) throw new Error('AI 没有给出构想');
         d.tagSrc ??= {};
@@ -175,7 +264,7 @@ export function makeFlow(deps) {
 
     // ───── 2. 人设 ─────
     async function qa(d) {
-        const j = parseJSON(await run('qa', d));
+        const j = parseJSON(await run('qa', d, {}, { json: true }));
         const names = (d.personas ?? []).map((p) => p.name);
         d.qa = {
             chars: arr(j.chars).map((c, i) => ({
@@ -204,7 +293,8 @@ export function makeFlow(deps) {
             npRule,
             answers: answers || answersText(d),
             template: fill(PERSONA_TEMPLATE, { name }),
-        });
+        }, { key: `persona:${name}`, prev: p.text, close: `</${name}>` });
+        remember(d, `persona:${name}`, { overview: p.overview, text: p.text });
         const parsed = splitBlocks(raw);
         const body = blockOf(parsed, '人设') || parsed.lead || raw;
         p.overview = blockOf(parsed, '概要') || p.overview;
@@ -221,7 +311,8 @@ export function makeFlow(deps) {
             complexity,
             fandom,
             zeroRule: pistol ? '- 手枪卡：不用零度写作，简洁写清场景即可。' : rules()['零度写作'],
-        });
+        }, { key: 'world', prev: d.world?.main, close: '</世界观>' });
+        remember(d, 'world', d.world);
         const parsed = splitBlocks(raw);
         d.world = {
             main: parsed.lead,
@@ -234,7 +325,8 @@ export function makeFlow(deps) {
     // ───── 4. NPC ─────
     async function npc(d) {
         const count = concept(d)?.npcs ?? 2;
-        const raw = await run('npc', d, { count: count || 2 });
+        const raw = await run('npc', d, { count: count || 2 }, { key: 'npc', prev: (d.npcs ?? []).map((n) => n.content).join('\n') });
+        remember(d, 'npc', d.npcs);
         const parsed = splitBlocks(raw);
         const list = parsed.blocks.filter((b) => b.body).map((b) => ({ name: b.name || '未命名', keys: b.keys, content: b.body }));
         if (!list.length && parsed.lead) list.push({ name: 'NPC', keys: [], content: parsed.lead });
@@ -245,7 +337,8 @@ export function makeFlow(deps) {
     // ───── 5. 路线 ─────
     async function routes(d) {
         if (!d.routes?.length) d.routes = [{ name: '主线', user: '', period: '', info: '' }];
-        const raw = await run('routes', d);
+        const raw = await run('routes', d, {}, { key: 'routes', prev: d.routes.map((r) => r.info).join('\n') });
+        remember(d, 'routes', d.routes.map((r) => r.info));
         const parsed = splitBlocks(raw);
         const blocks = parsed.blocks.filter((b) => b.body);
         if (!blocks.length && parsed.lead) blocks.push({ name: d.routes[0].name, body: parsed.lead });
@@ -262,7 +355,8 @@ export function makeFlow(deps) {
 
     // ───── 6. 基调与规则 ─────
     async function tone(d) {
-        const raw = await run('tone', d, { cardType: tagValue(d.tags, 'cardType').join('、') || '单人卡' });
+        const raw = await run('tone', d, { cardType: tagValue(d.tags, 'cardType').join('、') || '单人卡' }, { key: 'tone', prev: d.tone, close: '</创作文体>' });
+        remember(d, 'tone', d.tone);
         d.tone = extractTagged(raw, '创作文体');
         return d;
     }
@@ -270,7 +364,8 @@ export function makeFlow(deps) {
     async function free(d, i) {
         const f = d.free[i];
         if (!f?.name?.trim()) throw new Error('先给模块起个名字');
-        const raw = await run('free', d, { name: f.name.trim(), desc: f.desc || '（无）' });
+        const raw = await run('free', d, { name: f.name.trim(), desc: f.desc || '（无）' }, { key: `free:${f.name.trim()}`, prev: f.content, close: `</${f.name.trim()}>` });
+        remember(d, `free:${f.name.trim()}`, f.content);
         f.content = extractTagged(raw, f.name.trim());
         return d;
     }
@@ -280,7 +375,7 @@ export function makeFlow(deps) {
         check();
         progress(`${step.name}…`);
         const user = fill(step.template, { ...baseVars(d), name: step.name });
-        const out = await deps.llm({ system: step.stage === 'greeting' ? SYSTEM_PROSE : SYSTEM_CARD, user, stage: step.stage || 'card', temperature: 0.8 });
+        const out = strip(await deps.llm({ system: withBan(step.stage === 'greeting' ? SYSTEM_PROSE : SYSTEM_CARD, d), user, stage: step.stage || 'card', temperature: 0.8 }));
         check();
         d.custom ??= {};
         d.custom[step.id] = out;
@@ -301,7 +396,8 @@ export function makeFlow(deps) {
             length: S().greetingLength || '600–900',
             routeInfo: r.info || `${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}`,
             personas: clip((d.personas ?? []).map((p) => p.text).join('\n\n'), 5000),
-        });
+        }, { key: `greet:${r.name}`, prev: (d.greetings ?? []).filter((g) => g.route === r.name).map((g) => g.text).join('\n\n') });
+        remember(d, `greet:${r.name}`, (d.greetings ?? []).filter((g) => g.route === r.name).map((g) => g.text));
         const parsed = splitBlocks(raw);
         let texts = parsed.blocks.filter((b) => b.type === '开场白' && b.body).map((b) => b.body);
         if (!texts.length && parsed.lead) texts = [parsed.lead];
@@ -316,10 +412,26 @@ export function makeFlow(deps) {
         if (!p?.text) throw new Error(`${name} 还没有人设`);
         const arch = concept(d)?.lineup?.find((l) => l.name === name)?.archetype?.join('、') || tagValue(d.tags, 'archetype').join('、') || '主角';
         const tags = ['era', 'relation', 'flavor', 'cp'].map((k) => tagValue(d.tags, k).join('、')).filter(Boolean).join('；');
-        const j = parseJSON(await run('predict', d, { archetype: arch, tags }));
+        // 第一次：只给标签，让 AI 猜刻板写法（看不到人设）
+        const j = parseJSON(await run('predict', d, { archetype: arch, tags }, { json: true }));
         const predicted = { scenes: arr(j.scenes), traits: arr(j.traits).map(str) };
+        const stereotypes = [
+            ...predicted.scenes.flatMap((sc) => [sc.behavior && `${sc.scene}：${sc.behavior}`, sc.line && `${sc.scene}时说：${sc.line}`]),
+            ...predicted.traits,
+        ].filter(Boolean).map((x) => `- ${x}`).join('\n');
+        // 第二次：按意思比对，不看字面
+        let judged = [];
+        try {
+            const k = parseJSON(await run('judge', d, { name, stereotypes, persona: p.text }, { json: true }));
+            judged = arr(k.overlaps).filter((o) => str(o?.card)).slice(0, 8)
+                .map((o) => ({ from: 'AI 比对', text: [str(o.stereotype), str(o.why)].filter(Boolean).join('：'), card: str(o.card), score: 1 }));
+        } catch (e) {
+            if (aborted()) throw e;
+        }
+        const local = predictOverlap(predicted, p.text, S().predictThreshold ?? 0.42);
+        const overlaps = [...judged, ...local.filter((l) => !judged.some((x) => x.card.includes(l.card.slice(0, 12)) || l.card.includes(x.card.slice(0, 12))))];
         d.predict ??= {};
-        d.predict[name] = { predicted, overlaps: predictOverlap(predicted, p.text, S().predictThreshold ?? 0.42) };
+        d.predict[name] = { predicted, overlaps, rewritten: false };
         return d.predict[name];
     }
 
@@ -330,7 +442,8 @@ export function makeFlow(deps) {
         const overlaps = ov.map((o) => `- 卡里：「${o.card}」\n  刻板写法（${o.from}）：「${o.text}」`).join('\n');
         const raw = await run('destale', d, { name, overlaps, persona: p.text });
         p.text = extractTagged(raw, name);
-        d.predict[name].overlaps = predictOverlap(d.predict[name].predicted, p.text, S().predictThreshold ?? 0.42);
+        d.predict[name].overlaps = [];
+        d.predict[name].rewritten = true;
         return d;
     }
 
@@ -339,8 +452,10 @@ export function makeFlow(deps) {
         const names = (d.personas ?? []).map((p) => p.name).concat((d.npcs ?? []).map((n) => n.name));
         const pistol = isPistol(d);
         const sections = [];
+        const ban = banned(d);
         const add = (label, text, kind) => {
             const issues = scanCard(text, kind, { names, pistol });
+            for (const w of findWords(text, ban)) issues.push({ type: 'cliche', level: 'warn', label: '禁用词', match: w });
             if (issues.length) sections.push({ label, issues });
         };
         add('基调与规则', d.tone, 'tone');
@@ -383,7 +498,8 @@ export function makeFlow(deps) {
         const raw = await run('intro', d, {
             introTags: tagsText(d.tags, L()),
             greetingSample: g ? clip(g.text, 600) : '（无）',
-        });
+        }, { key: 'intro', prev: d.intro?.text });
+        remember(d, 'intro', d.intro);
         const parsed = splitBlocks(raw);
         const parts = Object.fromEntries(parsed.blocks.map((b) => [b.type, b.body]));
         const titles = parseTitles(parts['标题']);
@@ -406,6 +522,7 @@ export function makeFlow(deps) {
     }
 
     return {
+        banned, strip, restore, remember, slotOf,
         inspire, ideaFromInspire, localTags, idea, pickConcept, qa, persona, world, npc, routes, tone, free, custom,
         greetings, predict, destale, localCheck, textSlots, intro, composeIntroFor, baseVars,
     };

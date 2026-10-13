@@ -93,3 +93,28 @@ export function clip(text, max = 1500) {
     const s = String(text ?? '').trim();
     return s.length > max ? `${s.slice(0, max)}\n……（以下省略）` : s;
 }
+
+/** 规则库里“每行一个”的词表 */
+export function wordList(text) {
+    return [...new Set(String(text ?? '').split(/[\n,，、]/).map((w) => w.trim()).filter(Boolean))];
+}
+
+/**
+ * 直接删掉程度副词这类词，不调 API。
+ * 数字后面的不删（七十分），“十分钟”“非常时期”“万分之一”不删；后面跟的“的/地”一起删（无比的愤怒 → 愤怒）。
+ */
+export function stripWords(text, words) {
+    let out = String(text ?? '');
+    for (const w of wordList(words)) {
+        const e = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rx = new RegExp(`(?<![零一二三四五六七八九十百千万两0-9])${e}(?!时期|钟|之|于)(?:[的地](?=[\\u4e00-\\u9fff]))?(?=[\\u4e00-\\u9fff，。！？、；：,.!?…—\\s」”』）)]|$)`, 'g');
+        out = out.replace(rx, '');
+    }
+    return out;
+}
+
+/** 文本里出现的禁用词 */
+export function findWords(text, words, skip = []) {
+    const s = String(text ?? '');
+    return wordList(words).filter((w) => !skip.includes(w) && s.includes(w));
+}

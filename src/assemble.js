@@ -101,7 +101,11 @@ const keysOf = (list) => [...new Set((list ?? []).map((k) => String(k).trim()).f
  * 按桶型结构生成条目规格：
  * 基调（角色前，蓝灯）→ 世界观（角色后，蓝灯）→ 人设概要（蓝灯）→ 人设（绿灯）→ NPC（绿灯）→ 路线（蓝灯，只开第一条）→ 自由模块
  */
-export function buildEntries(draft, { personaBlue = false, activeRoute = 0 } = {}) {
+/**
+ * personaPlace：blue = 人设蓝灯常驻（默认）；green = 人设绿灯 + 蓝灯概要；description = 人设写进角色描述，不进世界书
+ */
+export function buildEntries(draft, { personaPlace = 'blue', personaBlue, activeRoute = 0 } = {}) {
+    if (personaBlue === true) personaPlace = 'blue';
     const out = [];
     const add = (o) => { if (o.content?.trim()) out.push({ ...o, content: o.content.trim() }); };
 
@@ -110,13 +114,15 @@ export function buildEntries(draft, { personaBlue = false, activeRoute = 0 } = {
     for (const e of draft.world?.extra ?? []) {
         add({ comment: `世界观·${e.name}`, content: e.content, constant: !keysOf(e.keys).length, key: keysOf(e.keys), position: POS.after, order: 210 });
     }
-    const ov = (draft.personas ?? []).filter((p) => p.overview?.trim());
+    const ov = personaPlace === 'green' ? (draft.personas ?? []).filter((p) => p.overview?.trim()) : [];
     if (ov.length) {
         add({ comment: '人设概要', content: `<人设概要>\n${ov.map((p) => `${p.name}：${p.overview.trim()}`).join('\n')}\n</人设概要>`, constant: true, position: POS.after, order: 300 });
     }
-    for (const p of draft.personas ?? []) {
-        const keys = keysOf([p.name, ...(p.keys ?? [])]);
-        add({ comment: `人设·${p.name}`, content: p.text, constant: personaBlue, key: keys, position: POS.after, order: 400 });
+    if (personaPlace !== 'description') {
+        for (const p of draft.personas ?? []) {
+            const keys = keysOf([p.name, ...(p.keys ?? [])]);
+            add({ comment: `人设·${p.name}`, content: p.text, constant: personaPlace !== 'green', key: keys, position: POS.after, order: 400 });
+        }
     }
     for (const n of draft.npcs ?? []) {
         add({ comment: `NPC·${n.name}`, content: n.content, constant: false, key: keysOf([n.name, ...(n.keys ?? [])]), position: POS.after, order: 450 });
@@ -169,12 +175,12 @@ export function orderedGreetings(draft) {
 }
 
 /** 生成 /api/characters/create 的请求体 */
-export function buildCharacter(draft, { worldName = '', creator = '', intro = '' } = {}) {
+export function buildCharacter(draft, { worldName = '', creator = '', intro = '', personaPlace = 'blue' } = {}) {
     const greetings = orderedGreetings(draft).map((g) => g.text.trim());
     const name = String(draft.name || draft.personas?.[0]?.name || draft.concepts?.[draft.pick]?.title || '新角色').trim();
     return {
         ch_name: name,
-        description: '',
+        description: personaPlace === 'description' ? (draft.personas ?? []).map((p) => p.text?.trim()).filter(Boolean).join('\n\n') : '',
         personality: '',
         scenario: '',
         first_mes: greetings[0] ?? '',

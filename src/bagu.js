@@ -25,14 +25,14 @@ export function setBaguEngine(e) { engine = e; tried = true; }
 export const hasBagu = () => !!engine;
 
 /** 用八股清理自己的设置组规则（我的八股词、自定义规则、分组开关都生效） */
-export function baguOptions(extensionSettings) {
+export function baguOptions(extensionSettings, extraWords = []) {
     if (!engine) return null;
     const s = extensionSettings?.baguCleaner ?? {};
     const { rules, errors } = engine.buildRules({
         ruleOverrides: s.ruleOverrides ?? {},
         disabledGroups: s.disabledGroups ?? [],
         customRules: s.customRules ?? '',
-        userWords: s.userWords ?? '',
+        userWords: [s.userWords ?? '', ...extraWords].join('\n'),
     });
     return { rules, errors, protectQuotes: s.protectQuotes ?? true, aiPrompt: s.aiPrompt };
 }
@@ -58,6 +58,8 @@ export async function baguRewrite(text, kind, opts, call, isAborted = () => fals
         || (must(v).length ? `还含必改词：${[...new Set(must(v).map((h) => h.match))].join('、')}` : '');
     const replacements = new Map();
     const failed = [];
+    let retries = 0;
+    const maxRetries = 3;
     for (let i = 0; i < targets.length; i += 10) {
         if (isAborted()) break;
         const batch = targets.slice(i, i + 10);
@@ -66,11 +68,18 @@ export async function baguRewrite(text, kind, opts, call, isAborted = () => fals
 【句子】
 ${JSON.stringify(batch.map((t) => ({ id: t.id, 句子: t.text, 八股: t.hits.map((h) => h.match), 前一句: t.prev, 后一句: t.next })), null, 1)}`;
         let edits = new Map();
-        try { edits = engine.parseEdits(await call(sys, prompt)); } catch { /* 逐句重做 */ }
+        // 整批格式错了先整批重来一次，不逐句发请求
+        for (let t = 0; t < 2 && !edits.size; t++) {
+            if (isAborted()) break;
+            try { edits = engine.parseEdits(await call(sys, prompt)); } catch { edits = new Map(); }
+        }
         for (const t of batch) {
             if (isAborted()) break;
             let v = edits.get(t.id);
             if (!validate(t, v)) { replacements.set(t.id, v); continue; }
+            // 单句重做有上限，避免请求扎堆触发 429
+            if (retries >= maxRetries) { failed.push(t.text.slice(0, 30)); continue; }
+            retries++;
             const retry = `【文本类型】${kind}
 【前一句】${t.prev || '（无）'}
 【要改的句子】${t.text}

@@ -65,16 +65,20 @@ await check('问答：题目和选项', async () => {
 });
 
 await check('人设：概要和 YAML 分开，作者回答进提示词，八股规则进提示词', async () => {
-    replies.push('<<<概要>>>\n他是春天本身。\n<<<人设>>>\n好的\n<迟春>\n角色详情:\n  迟春:\n    矛盾轴:\n      - 轴: 想被记住 ↔ 怕连累人\n        落点: 宁可被忘\n</迟春>\n以上');
+    replies.push('<<<概要>>>\n他是极其安静的春天本身。\n<<<人设>>>\n好的\n<迟春>\n角色详情:\n  迟春:\n    矛盾轴:\n      - 轴: 想被记住 ↔ 怕连累人\n        落点: 宁可被忘\n</迟春>\n以上');
     await flow.persona(d, '迟春');
     const p = d.personas[0];
-    assert.equal(p.overview, '他是春天本身。');
+    assert.equal(p.overview, '他是安静的春天本身。', '程度副词直接删掉');
     assert.ok(p.text.startsWith('<迟春>') && p.text.endsWith('</迟春>'));
     const u = sent.at(-1).user;
     assert.ok(u.includes('拥抱是他留在人间的锚'));
     assert.ok(u.includes('只写特异点'));
     assert.ok(u.includes('矛盾轴'));
     assert.ok(!u.includes('{{name}}') && !u.includes('{{rules'), '变量都填上了');
+    assert.ok(sent.at(-1).system.includes('一律不要出现') && sent.at(-1).system.includes('占有欲'), '禁用词进了系统提示');
+    settings.rules = { 禁用词: '神明\n占有欲' };
+    assert.deepEqual(flow.banned(d), ['占有欲'], '选了“神明”标签就不禁这个词');
+    settings.rules = {};
     assert.equal(sent.at(-1).stage, 'card');
 });
 
@@ -113,13 +117,17 @@ await check('基调：只取 <创作文体>；开场白走开场白阶段，按�
 await check('可预测性：撞车的句子被找出来，重写后复查', async () => {
     d.personas[0].text = '<迟春>\n性格解释:\n  - 吃醋时把人拉到身后宣示主权\n  - 每年春天第一天去旧桥下等人\n</迟春>';
     replies.push(JSON.stringify({ scenes: [{ scene: '吃醋', behavior: '他会把人拉到身后宣示主权', line: '你是我的' }], traits: ['外冷内热'] }));
+    replies.push(JSON.stringify({ overlaps: [{ card: '吃醋时把人拉到身后宣示主权', stereotype: '他会把人拉到身后宣示主权', why: '一模一样' }, { card: '每年春天第一天去旧桥下等人', stereotype: '外冷内热', why: '默默守候' }] }));
     const r = await flow.predict(d, '迟春');
-    assert.equal(r.overlaps.length, 1);
-    assert.ok(!sent.at(-1).user.includes('旧桥'), '预测时不能看到卡的内容');
+    assert.ok(!sent.at(-2).user.includes('旧桥'), '第一次预测时看不到卡的内容');
+    assert.ok(sent.at(-1).user.includes('旧桥') && sent.at(-1).user.includes('外冷内热'), '第二次按意思比对');
+    assert.equal(r.overlaps.length, 2, 'AI 比对出 2 条，本地那条和它重复不再算');
+    assert.equal(r.overlaps[0].from, 'AI 比对');
     replies.push('<迟春>\n性格解释:\n  - 吃醋时不说话，把对方送他的东西还回去\n</迟春>');
     await flow.destale(d, '迟春');
     assert.ok(sent.at(-1).user.includes('宣示主权'));
     assert.equal(d.predict['迟春'].overlaps.length, 0);
+    assert.equal(d.predict['迟春'].rewritten, true);
 });
 
 await check('本地质检和文本位置', () => {
@@ -158,7 +166,7 @@ await check('简介：三个标题，按模板拼好', async () => {
 await check('组装：世界书条目和角色卡', () => {
     const es = buildEntries(d);
     const comments = es.map((e) => e.comment);
-    for (const c of ['基调与规则', '世界观', '世界观·春祭', '人设概要', '人设·迟春', 'NPC·守庙人', '路线·第一个春天', '路线·失去之后', '模块·信物']) assert.ok(comments.includes(c), c);
+    for (const c of ['基调与规则', '世界观', '世界观·春祭', '人设·迟春', 'NPC·守庙人', '路线·第一个春天', '路线·失去之后', '模块·信物']) assert.ok(comments.includes(c), c);
     const wd = toWorldData(es);
     assert.equal(Object.keys(wd.entries).length, es.length);
     const body = buildCharacter(d, { worldName: '迟春' });
@@ -178,6 +186,57 @@ await check('灵感：掷骰子出问题，锁定的骰子不变，回答拼成�
     flow.ideaFromInspire(e);
     assert.ok(e.idea.startsWith('她欠他一个解释；刑场上'));
     assert.ok(e.idea.includes('宿敌'));
+});
+
+await check('修改意见：重写时带上意见和上一版，用完清空', async () => {
+    d.feedback = { tone: '太温吞了，冲突再尖锐一点' };
+    replies.push('<创作文体>\n基石: 尖锐\n</创作文体>');
+    await flow.tone(d);
+    const u = sent.at(-1).user;
+    assert.ok(u.includes('【作者对上一版的修改意见，必须优先满足】\n太温吞了') && u.includes('【上一版】'), '意见和上一版都发了');
+    assert.equal(d.feedback.tone, '');
+    assert.ok(d.tone.includes('尖锐'));
+});
+
+await check('上一版：可以换回去，再点一次又换回来', () => {
+    const before = d.tone;
+    assert.ok(d.history.tone.length >= 1);
+    assert.ok(flow.restore(d, 'tone'));
+    assert.notEqual(d.tone, before);
+    assert.ok(flow.restore(d, 'tone'));
+    const seen = new Set([d.tone]);
+    for (let i = 0; i < d.history.tone.length; i++) { flow.restore(d, 'tone'); seen.add(d.tone); }
+    assert.ok(seen.has(before), '轮换一圈能回到最新版');
+    assert.equal(flow.restore(d, 'nothing'), false);
+});
+
+await check('上一版：人设、开场白也能换回', async () => {
+    const old = d.personas[0].text;
+    replies.push('<<<概要>>>\n新概要\n<<<人设>>>\n<迟春>\n新人设\n</迟春>');
+    await flow.persona(d, '迟春');
+    assert.ok(d.personas[0].text.includes('新人设'));
+    flow.restore(d, 'persona:迟春');
+    assert.equal(d.personas[0].text, old);
+    const g = d.greetings.filter((x) => x.route === '第一个春天').map((x) => x.text);
+    replies.push('<<<开场白>>>\n新开场');
+    await flow.greetings(d, 0, 1);
+    flow.restore(d, 'greet:第一个春天');
+    assert.deepEqual(d.greetings.filter((x) => x.route === '第一个春天').map((x) => x.text), g);
+});
+
+await check('截断：没有收尾标签就自动续写一次；还不完整就标记', async () => {
+    replies.push('<世界观>\n势力:\n  春神庙: 想留住');
+    replies.push('迟春\n</世界观>');
+    await flow.world(d);
+    assert.ok(sent.at(-1).user.includes('从断掉的地方直接接着写'));
+    assert.ok(d.world.main.includes('想留住迟春') && d.world.main.includes('</世界观>'), d.world.main);
+    assert.ok(!d.truncated.world);
+    replies.push('<世界观>\n写到一半');
+    replies.push('还是没写完');
+    await flow.world(d);
+    assert.equal(d.truncated.world, true);
+    flow.restore(d, 'world');
+    assert.ok(!d.truncated.world, '换回上一版后去掉截断提醒');
 });
 
 assert.equal(replies.length, 0);
