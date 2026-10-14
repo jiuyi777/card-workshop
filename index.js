@@ -1,17 +1,17 @@
 // 写卡工坊 · SillyTavern 扩展
 // 一句话脑洞 → 构想 → 标签 → 人设 → 世界观 → NPC → 路线 → 基调与规则 → 开场白 → 质检 → 导入 → 简介
 import { buildLibrary, toggleTag, tagValue, dimOf } from './src/tags.js';
-import { DEFAULT_PROMPTS, DEFAULT_RULES, STEP_INFO, TEMPLATE_VARS } from './src/prompts.js';
+import { DEFAULT_PROMPTS, DEFAULT_RULES, STEP_INFO, TEMPLATE_VARS, RULE_META, CARD_MODES } from './src/prompts.js';
 import { unshield, findWords } from './src/parse.js';
 import { lifeStoryStats, thinLifeStory } from './src/checks.js';
-import { emptyDraft, buildEntries, toWorldData, buildCharacter, uniqueName, orderedGreetings, mapStrings, DEFAULT_INTRO_STYLE, INTRO_VARS, mergeWorld, cardUpdate, worldToBook, sentContext } from './src/assemble.js';
+import { CREDIT_WORKSHOP, emptyDraft, buildEntries, toWorldData, buildCharacter, uniqueName, orderedGreetings, mapStrings, DEFAULT_INTRO_STYLE, INTRO_VARS, mergeWorld, cardUpdate, worldToBook, sentContext } from './src/assemble.js';
 import { makeTokenCounter, fmtTokens } from './src/tokens.js';
 import { makeFlow } from './src/flow.js';
 import { callLLM, listProfiles, listPresets } from './src/llm.js';
 import { loadBagu, hasBagu, baguOptions, baguScan, baguRewrite, baguRewriteMany, wordsText, isInstructions } from './src/bagu.js';
 
 const MODULE = 'cardWorkshop';
-const VERSION = '0.11.0';
+const VERSION = '0.15.0';
 const getCtx = () => SillyTavern.getContext();
 
 const DEFAULTS = {
@@ -26,6 +26,12 @@ const DEFAULTS = {
     autoBackstory: true,
     backstoryCount: '4–7',
     introStyles: [],
+    styles: [],
+    customRules: {},
+    ruleOff: {},
+    ruleModes: {},
+    ruleSteps: {},
+    offPages: [],
     introStyle: 0,
     minInterval: 3,
     greetingCount: 2,
@@ -34,6 +40,7 @@ const DEFAULTS = {
     license: { repost: '不可', edit: '可', commercial: '不可' },
     presetNote: '',
     introNotes: '',
+    introThanks: '',
     predictThreshold: 0.42,
     autoPredict: true,
     autoBagu: true,
@@ -169,6 +176,49 @@ const ta = (path, rows = 6, ph = '') => `<textarea class="text_pole cw-ta" data-
 const inp = (path, ph = '', cls = '') => `<input class="text_pole cw-in ${cls}" data-bind="${path}" value="${esc(getPath(draft(), path) ?? '')}" placeholder="${esc(ph)}">`;
 const listInp = (path, ph = '关键词，逗号分隔') => `<input class="text_pole cw-in" data-bind-list="${path}" value="${esc((getPath(draft(), path) ?? []).join('，'))}" placeholder="${esc(ph)}">`;
 
+/** 文本框路径 → 这一块的“换回上一版”键和名字 */
+function keyOfPath(d, path) {
+    const m = path.split('.');
+    const at = (i) => getPath(d, m.slice(0, i).join('.'));
+    switch (m[0]) {
+        case 'personas': { const p = at(2); return p ? { key: `persona:${p.name}`, label: `${m[2] === 'overview' ? '人设概要' : '人设'}·${p.name}` } : null; }
+        case 'world': return { key: 'world', label: '世界观' };
+        case 'npcs': return { key: 'npc', label: `NPC·${at(2)?.name ?? ''}` };
+        case 'routes': return { key: 'routes', label: `路线·${at(2)?.name ?? ''}` };
+        case 'tone': return { key: 'tone', label: '基调与规则' };
+        case 'relations': return { key: 'relations', label: '角色关系' };
+        case 'free': return { key: `free:${String(at(2)?.name ?? '').trim()}`, label: `模块·${at(2)?.name ?? ''}` };
+        case 'greetings': return { key: `greet:${at(2)?.route ?? ''}`, label: '开场白' };
+        case 'intro': return m[1] === 'text' ? { key: 'intro', label: '简介' } : null;
+        case 'au': return m[1] === 'map' ? { key: 'au:map', label: 'AU 映射表' } : { key: 'au:core', label: 'AU 内核' };
+        case 'existing':
+            if (m[1] === 'fields') return { key: `exist:field:${m[2]}`, label: { description: '角色描述', personality: '性格', scenario: '场景', mes_example: '对话示例' }[m[2]] ?? m[2] };
+            if (m[1] === 'entries') return { key: `exist:entry:${at(3)?.uid}`, label: at(3)?.comment ?? '条目' };
+            if (m[1] === 'greetings') return { key: `exist:greet:${m[2]}`, label: `原卡开场白 ${Number(m[2]) + 1}` };
+            return null;
+        default: return null;
+    }
+}
+
+/** 在文本框里选中一段后，框下面出现“局部重写” */
+const LOCAL_SKIP = /^(idea|feedback|play|ideaQA|inspire|qa)\b/;
+function updateSelBar(el) {
+    const path = el.dataset.bind;
+    const $el = $(el);
+    const $wrap = $el.next('.cw-tokline').length ? $el.next('.cw-tokline') : $el;
+    let $bar = $wrap.next('.cw-selbar');
+    const a = el.selectionStart, b = el.selectionEnd;
+    if (!path || LOCAL_SKIP.test(path) || !(b > a) || !el.value.slice(a, b).trim()) { if (!$bar.find('.cw-selin').is(':focus')) $bar.remove(); return; }
+    state.sel = { path, start: a, end: b };
+    const n = [...el.value.slice(a, b)].length;
+    if (!$bar.length) {
+        $bar = $(`<div class="cw-selbar"><div class="cw-row"><span class="cw-small cw-selcount"></span><span class="cw-grow"></span>${btn('localEdit', '局部重写', 'class="cw-primary"')}</div><input class="text_pole cw-in cw-selin" placeholder="怎么改？比如“更狠一点”“改成他嘴硬”。空着就是重写这一段"></div>`);
+        $bar.find('.cw-selin').val(state.selNote ?? '');
+        $wrap.after($bar);
+    }
+    $bar.find('.cw-selcount').text(`已选 ${n} 字，只改这一段`);
+}
+
 /** 每一块下面：修改意见、换回上一版、截断提醒 */
 function toolsHtml(key, hasContent = true) {
     const d = draft();
@@ -178,8 +228,28 @@ function toolsHtml(key, hasContent = true) {
     return `<div class="cw-tools">
 ${cut ? `<div class="cw-warn">回复可能被截断了（自动续写过一次还不完整）。在“设置”里把最大回复长度调大再重写，或者手动补完。</div>` : ''}
 <input class="text_pole cw-in cw-fb" data-bind="feedback.${esc(key)}" value="${esc(d.feedback?.[key] ?? '')}" placeholder="哪里不满意？写在这里，点重写时会带上（可选）">
-${(d.existing && hasContent && flow.textSlot(d, key)) || n ? `<div class="cw-row">${d.existing && hasContent && flow.textSlot(d, key) ? btn('revise', '按意见改', `data-key="${esc(key)}"`) : ''}${n ? btn('restore', `换回上一版（存了 ${n} 版）`, `data-key="${esc(key)}"`) : ''}</div>` : ''}
+${(hasContent && flow.textSlot(d, key)) || n ? `<div class="cw-row">${hasContent && flow.textSlot(d, key) ? btn('revise', '按意见改', `data-key="${esc(key)}"`) : ''}${n ? btn('restore', `换回上一版（存了 ${n} 版）`, `data-key="${esc(key)}"`) : ''}</div>` : ''}
+${changesHtml(d.changes?.[key])}
 </div>`;
+}
+
+/** 人设页顶部：这张卡用哪个文风 */
+function styleRowHtml() {
+    const d = draft();
+    const list = settings().styles ?? [];
+    return `<div class="cw-row"><span class="cw-small">文风</span><select class="text_pole cw-in cw-stylesel" style="width:auto"><option value="0">不指定</option>${list.map((x, i) => `<option value="${i + 1}" ${Number(d.style) === i + 1 ? 'selected' : ''}>${esc(x.name || `文风 ${i + 1}`)}</option>`).join('')}</select>
+${Number(d.style) ? `<label class="checkbox_label cw-small"><input type="checkbox" class="cw-styleall" ${d.styleAll ? 'checked' : ''}>世界观、NPC、路线、模块、开场白也用</label>` : ''}<span class="cw-grow"></span><span class="menu_button cw-btn" data-act="go" data-page="prompts" data-tab="style">${list.length ? '编辑文风' : '写一个文风'}</span></div>`;
+}
+
+/** 上次改了哪里：原来 → 现在 */
+function changesHtml(c) {
+    if (!c) return '';
+    if (!c.hunks?.length) return `<div class="cw-small cw-dim">${esc(c.how || '上次修改')}：没有改动。</div>`;
+    const cut = (t) => (t.length > 400 ? `${t.slice(0, 400)}……` : t);
+    return `<details class="cw-mini cw-changes" open><summary>${esc(c.how || '上次修改')}：改了 ${c.hunks.length + (c.more ?? 0)} 处</summary>
+${c.hunks.map((h) => `<div class="cw-hunk">${h.before.trim() ? `<div class="cw-del">${esc(cut(h.before.trim())).replace(/\n/g, '<br>')}</div>` : '<div class="cw-dim cw-small">（新加）</div>'}${h.after.trim() ? `<div class="cw-add">${esc(cut(h.after.trim())).replace(/\n/g, '<br>')}</div>` : '<div class="cw-dim cw-small">（删掉了）</div>'}</div>`).join('')}
+${c.more ? `<div class="cw-dim cw-small">还有 ${c.more} 处没列出来。</div>` : ''}
+<div class="cw-dim cw-small">红色是原来的，绿色是现在的。不满意点“换回上一版”。</div></details>`;
 }
 
 /** AU：内核、AU 设定、映射表 */
@@ -255,10 +325,20 @@ function answerHtml(path, options, ph = '或者自己写') {
 
 // ───────────── 页面：目录 + 二级页 ─────────────
 
+const ABOUT_LICENSE = [
+    '使用：免费。',
+    '二传：请保留作者（酒疫）和原仓库链接 https://github.com/jiuyi777/card-workshop。',
+    '二改：可以，请注明改自写卡工坊；默认提示词和人设模板来自灰鸠老师，二改时也请保留这条致谢。',
+    '商用：不可以。',
+    '用写卡工坊写出来的卡归卡作者自己。',
+];
+
+const OPTIONAL_PAGES = ['world', 'npc', 'routes', 'tone', 'play', 'check', 'intro'];
+
 const PAGES = [
     { id: 'idea', name: '一句话构想', desc: '一句话脑洞，或者掷骰子', status: (d) => (d.pick >= 0 && d.concepts[d.pick] ? d.concepts[d.pick].title : d.concepts.length ? `${d.concepts.length} 个构想，还没选` : ''), done: (d) => !!d.existing || !!d.au?.map || (d.pick >= 0 && !!d.concepts[d.pick]) },
     { id: 'tags', name: '标签', desc: '构想时自动勾好，可以再改', status: (d) => d.tags.map((t) => t.name).slice(0, 6).join('、'), done: (d) => d.tags.length > 0 || !!d.existing },
-    { id: 'persona', name: '主要人设', desc: '先答问题，再生成', status: (d) => d.personas.map((p) => `${p.name}${p.text ? ' ✓' : ''}`).join('、'), done: (d) => d.personas.length > 0 && d.personas.every((p) => p.text) },
+    { id: 'persona', name: '主要人设', desc: '先答问题，再生成', status: (d) => (flow.modeOf(d) === 'world' && !d.personas.length ? '世界卡，人物在 NPC 里' : d.personas.map((p) => `${p.name}${p.text ? ' ✓' : ''}`).join('、') + (flow.modeOf(d) === 'multi' && d.personas.length > 1 ? (d.relations ? ' · 关系网 ✓' : ' · 关系网没写') : '')), done: (d) => (flow.modeOf(d) === 'world' && !d.personas.length) || (d.personas.length > 0 && d.personas.every((p) => p.text) && (flow.modeOf(d) !== 'multi' || d.personas.length < 2 || !!d.relations)) },
     { id: 'world', name: '世界观', status: (d) => (d.world.main ? '已写' : ''), done: (d) => !!d.world.main },
     { id: 'npc', name: 'NPC', status: (d) => (d.npcs.length ? `${d.npcs.length} 个` : ''), done: (d) => d.npcs.length > 0 || d.concepts[d.pick]?.npcs === 0 },
     { id: 'routes', name: '玩家与路线', status: (d) => (d.routes.length ? `${d.routes.filter((r) => r.info).length}/${d.routes.length} 条已写` : ''), done: (d) => d.routes.length > 0 && d.routes.every((r) => r.info) },
@@ -287,9 +367,10 @@ function pages() {
         const f = d.free.find((x) => x.fromStep === st.id);
         return { id: `step:${st.id}`, name: st.name || '我的步骤', desc: '我的步骤', custom: st, status: () => (f?.content ? '已写' : ''), done: () => !!f?.content };
     };
+    const off = new Set(settings().offPages ?? []);
     for (const p of PAGES) {
         if (p.id === 'idea' && d.au) continue; // AU 设定在“AU 内核与映射”页里写
-        out.push(p);
+        if (!off.has(p.id)) out.push(p);
         for (const st of steps) if ((st.after || 'tone') === p.id) out.push(mine(st));
     }
     return out;
@@ -316,7 +397,9 @@ function updateCalls() {
 function homeHtml() {
     const d = draft();
     const s = settings();
-    const hist = (s.drafts ?? []).map((x, i) => `<option value="${i}">${esc(x.name || x.idea?.slice(0, 16) || '未命名')} · ${new Date(x.updated).toLocaleDateString()}</option>`).join('');
+    const dname = (x) => x.name || x.idea?.slice(0, 16) || '未命名';
+    const when = (t) => (t ? new Date(t).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '');
+    const hist = (s.drafts ?? []).map((x, i) => `<div class="cw-row cw-draftrow"><span class="cw-grow cw-small"><b>${esc(dname(x))}</b> <span class="cw-dim">${esc(when(x.updated))}${x.existing ? ' · 改已有的卡' : x.au ? ' · AU' : ''}</span></span>${btn('openDraft', '打开', `data-i="${i}"`)}${btn('delDraft', '删除', `data-i="${i}"`)}</div>`).join('');
     const n = nextPage(d);
     const tile = (p, i) => {
         const st = p.status?.(d) || '';
@@ -325,7 +408,11 @@ function homeHtml() {
 <div class="cw-ts">${esc(st || p.desc || '还没开始')}</div></div>`;
     };
     return `${topHtml(`<div class="cw-row"><input class="text_pole cw-in cw-grow" data-bind="name" value="${esc(d.name)}" placeholder="卡名（导入时用）">${btn('newDraft', '新建')}<div class="menu_button cw-btn" data-act="go" data-page="load">改已有的卡</div></div>
-${hist ? `<select class="text_pole cw-hist"><option value="">历史草稿（${s.drafts.length}）</option>${hist}</select>` : ''}`)}
+<details class="cw-mini cw-drafts"><summary>草稿（当前 1 份${s.drafts?.length ? `，历史 ${s.drafts.length} 份` : ''}）</summary>
+<div class="cw-row cw-draftrow"><span class="cw-grow cw-small"><b>当前：${esc(dname(d))}</b> <span class="cw-dim">${esc(when(d.updated))}</span></span>${btn('delCurrent', '删除当前草稿')}</div>
+${hist || '<div class="cw-dim cw-small">没有历史草稿。点“新建”时当前草稿会放进这里（最多 8 份）。</div>'}
+${s.drafts?.length ? `<div class="cw-row cw-end">${btn('clearDrafts', '清空历史草稿')}</div>` : ''}
+</details>`)}
 ${d.au ? `<div class="cw-box cw-small">正在做 AU：<b>${esc(d.au.original.name)}</b> → ${esc(d.name)}。原卡不会动，最后存成一张新卡。</div>` : ''}
 ${d.existing ? `<div class="cw-box cw-small">正在改已有的卡：<b>${esc(d.existing.name)}</b>（${d.existing.world ? `世界书 ${esc(d.existing.world)}` : '没绑世界书'}）。改完到“导入酒馆”页写回原卡。</div>` : ''}
 <div class="cw-next">
@@ -335,8 +422,10 @@ ${d.existing ? `<div class="cw-box cw-small">正在改已有的卡：<b>${esc(d.
 ${blueLine(d) ? `<div class="cw-small cw-row"><span class="cw-grow">${blueLine(d)}</span><span class="cw-dim">导入后每次聊天都会发的设定</span></div>` : ''}
 <div class="cw-grid">${pages().map(tile).join('')}
 <div class="cw-tile cw-tool" data-act="go" data-page="settings"><div class="cw-tn">设置</div><div class="cw-ts">用哪个 API、写卡预设、开场白预设、调用间隔、人设放哪里</div></div>
+<div class="cw-tile cw-tool" data-act="go" data-page="about"><div class="cw-tn">关于</div><div class="cw-ts">功能、作者与致谢、使用授权、插件会动哪些东西</div></div>
 <div class="cw-tile cw-tool" data-act="go" data-page="prompts"><div class="cw-tn">提示词</div><div class="cw-ts">每一步的提示词、规则库（禁用词、直接删的词）、我的标签、我的步骤</div></div>
-</div>`;
+</div>
+${creditsHtml()}`;
 }
 
 function pageHtml(id) {
@@ -344,8 +433,8 @@ function pageHtml(id) {
     let i = list.findIndex((p) => p.id === id);
     if (i < 0 && id.startsWith('step:')) { state.page = id = 'home'; return homeHtml(); }
     const page = list[i];
-    const title = page ? `${i + 1}. ${page.name}` : { settings: '设置', prompts: '提示词', load: '改已有的卡' }[id] ?? '';
-    const body = page?.custom ? customHtml(page.custom) : { load: loadHtml, existing: existingHtml, au: auHtml, idea: ideaHtml, tags: tagsHtml, persona: personaHtml, world: worldHtml, npc: npcHtml, routes: routesHtml, tone: toneHtml, greet: greetingHtml, play: playHtml, check: checkHtml, import: importHtml, intro: introHtml, prompts: promptsHtml, settings: settingsPageHtml }[id]();
+    const title = page ? `${i + 1}. ${page.name}` : { settings: '设置', prompts: '提示词', load: '改已有的卡', about: '关于写卡工坊' }[id] ?? '';
+    const body = page?.custom ? customHtml(page.custom) : { load: loadHtml, existing: existingHtml, au: auHtml, idea: ideaHtml, tags: tagsHtml, persona: personaHtml, world: worldHtml, npc: npcHtml, routes: routesHtml, tone: toneHtml, greet: greetingHtml, play: playHtml, check: checkHtml, import: importHtml, intro: introHtml, prompts: promptsHtml, settings: settingsPageHtml, about: aboutHtml }[id]();
     const prev = list[i - 1];
     const next = list[i + 1];
     return `${topHtml(`<div class="cw-row"><div class="menu_button cw-btn" data-act="go" data-page="home">← 目录</div><b class="cw-grow cw-ptitle">${esc(title)}</b></div>`)}
@@ -393,12 +482,72 @@ ${inp(`concepts.${i}.tension.core`, '核心张力')}</details>` : ''}
     return html;
 }
 
+/** 目录底部的小字（纯文字，不放链接，免得误触；链接在“关于”页） */
+function creditsHtml() {
+    return '<div class="cw-credits cw-credline cw-small cw-dim">本写卡工坊默认提示词来自灰鸠老师，请关注灰鸠老师喵。</div>';
+}
+
+const HUIJIU_URL = 'https://discord.com/channels/1134557553011998840/1522409047696085143';
+
+/** 关于：功能、作者、授权、插件会动哪些东西 */
+function aboutHtml() {
+    const tpl = flow.ruleList().find((r) => r.name === '人设模板');
+    const tplOn = tpl && tpl.on && !tpl.edited;
+    return `<div class="cw-card"><div class="cw-ctitle">写卡工坊 v${VERSION}</div>
+<div>在酒馆里写角色卡：一句话脑洞 → 构想 → 人设 → 世界观 → NPC → 路线 → 开场白 → 试玩 → 质检 → 导入 → 简介。目标是写得快、写得好、没灵感时帮你想，并且少八股。</div></div>
+
+<div class="cw-card"><div class="cw-sub">作者与致谢</div>
+<div>写卡工坊 · <b>酒疫</b> 老师</div>
+<div>默认提示词、人设模板 · <b>灰鸠</b> 老师 <a href="${HUIJIU_URL}" target="_blank" rel="noopener">Discord</a></div>
+<div>联动：<b>八股清理</b>（装在同一个扩展目录就会自动接上）</div>
+<div class="cw-dim cw-small">生成简介时会自动写致谢：“感谢酒疫老师的写卡工坊”一定写；人设模板没改过时还写“感谢灰鸠老师的人设模板”${tplOn ? '' : '（你改了人设模板，现在不写这条）'}。设置里可以加自己的致谢。</div></div>
+
+<div class="cw-card"><div class="cw-sub">主要功能</div>
+<ul class="cw-small">
+<li>标签库 + 一句话自动打标签，掷骰子找灵感，问答帮你想清楚角色</li>
+<li>单人卡 / 多人卡（角色关系网）/ 无固定角色的世界卡</li>
+<li>矛盾建模人设、经历展开、可预测性测试（撞刻板印象就重写）</li>
+<li>开场白先想梗再扩写，写完立刻改掉必改词</li>
+<li>每页八股检查、按意见改、局部重写、改了什么、换回上一版</li>
+<li>试玩几轮再让 AI 点评，问题指到对应页面</li>
+<li>token 统计、常驻设定上限提醒</li>
+<li>改已有的卡、加路线和开场白、写回原卡（可撤销）、做 AU</li>
+<li>规则库可插拔：开关、限定卡类型、插到任意步骤、自己加；文风库；自己加步骤</li>
+<li>Discord 简介，多种简介风格</li>
+</ul></div>
+
+<div class="cw-card"><div class="cw-sub">使用授权</div>
+<div class="cw-small">${ABOUT_LICENSE.map((x) => `<div>${esc(x)}</div>`).join('')}</div></div>
+
+<div class="cw-card"><div class="cw-sub">插件会动哪些东西</div>
+<ul class="cw-small">
+<li>调 API：用你在设置里选的连接（默认是酒馆当前连接），会带上你绑定的写卡预设 / 开场白预设里打开的条目。不会切换你酒馆当前的预设和连接。</li>
+<li>读：角色卡、世界书（改已有的卡、读卡时）；八股清理的设置和“我的八股词”。</li>
+<li>写：只在你点“导入酒馆”“写回原卡”“写进角色卡”时创建或修改角色卡和世界书；写回前会备份，可以撤销。不删条目。</li>
+<li>草稿、提示词、规则都存在酒馆的扩展设置里，不会发到别的地方。</li>
+</ul></div>`;
+}
+
+/** 卡的类型：单人 / 多人 / 无固定角色。决定插进哪些规则模块、人设页和 NPC 页怎么写 */
+function modeHtml() {
+    const d = draft();
+    const auto = flow.modeOf({ ...d, mode: '' });
+    const cur = flow.modeOf(d);
+    const tip = {
+        single: '一个主要角色。',
+        multi: '几个主要角色地位相当。每个人的人设都会知道其他人；人设页多一块“角色关系网”（关系、修罗场、出场规则），常驻在人设后面；开场白和试玩会让至少两个人有戏份。',
+        world: '没有固定角色，AI 扮演整个世界。人设页可以空着；人物写进 NPC 库（默认 6 个起）；基调里会加叙事和 NPC 现编规则；开场白用旁白视角。',
+    }[cur];
+    return `<div class="cw-box"><div class="cw-row"><span class="cw-sub">卡的类型</span><select class="text_pole cw-in" data-bind="mode" style="width:auto"><option value="" ${d.mode ? '' : 'selected'}>自动（现在是：${esc(CARD_MODES[auto])}）</option>${Object.entries(CARD_MODES).map(([k, v]) => `<option value="${k}" ${d.mode === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></div>
+<div class="cw-dim cw-small">${esc(tip)}自动判断看“卡类型”“人数”标签和主要角色有几个。对应的写法在 提示词 → 规则库 的“多人卡”“世界卡”里，可以改，也可以关掉。</div></div>`;
+}
+
 function tagsHtml() {
     const d = draft();
     const L = lib();
     const src = d.tagSrc ?? {};
     const chip = (t, on) => `<span class="cw-chip tag ${on ? 'on' : ''} src-${src[`${t.dim}:${t.name}`] ?? 'user'}" data-act="tag" data-dim="${t.dim}" data-name="${esc(t.name)}">${esc(t.name)}${src[`${t.dim}:${t.name}`] === 'guess' ? '?' : ''}</span>`;
-    let html = `<div class="cw-dim cw-small">上面是已选的标签，点一下取消；下面按维度展开，点一下选上。实线框是你那句话里识别到的，虚线框是 AI 推荐的，带问号的是 AI 猜的，确认一下。</div>`;
+    let html = `${modeHtml()}<div class="cw-dim cw-small">上面是已选的标签，点一下取消；下面按维度展开，点一下选上。实线框是你那句话里识别到的，虚线框是 AI 推荐的，带问号的是 AI 猜的，确认一下。</div>`;
     html += `<div class="cw-chips">${(d.tags ?? []).map((t) => chip(t, true)).join('') || '<span class="cw-dim">还没有标签</span>'}</div>`;
     if (d.ai?.novel?.length || d.ai?.surprise) {
         html += `<div class="cw-box">`;
@@ -482,8 +631,16 @@ ${hasBagu() ? `<div class="cw-row">${btn('baguOne', '只清理这个人设', `da
 
 function personaHtml() {
     const d = draft();
-    if (!d.personas?.length) return '<div class="cw-dim">先选一个构想。</div>';
-    let html = `<div class="cw-row">${btn('qa', d.qa?.chars?.length ? '换一批问题' : '出问题（给脑洞）')}${btn('allPersonas', '生成全部人设')}</div>`;
+    const mode = flow.modeOf(d);
+    if (!d.personas?.length) {
+        return mode === 'world'
+            ? `<div class="cw-box">这是无固定角色的世界卡，主要角色可以不写：人物都放在 NPC 页的 NPC 库里，AI 按世界和 NPC 生成规则来演。想要几个固定出场的关键人物，也可以在这里加。</div><div class="cw-row">${btn('add', '加一个主要角色', 'data-path="personas" data-tpl="persona"')}</div>`
+            : `<div class="cw-dim">先选一个构想。</div><div class="cw-row">${btn('add', '手动加一个主要角色', 'data-path="personas" data-tpl="persona"')}</div>`;
+    }
+    let html = `<div class="cw-row">${btn('qa', d.qa?.chars?.length ? '换一批问题' : '出问题（给脑洞）')}${btn('allPersonas', '生成全部人设')}${btn('add', '加一个主要角色', 'data-path="personas" data-tpl="persona"')}</div>
+${mode === 'multi' ? '<div class="cw-dim cw-small">多人卡：每个人的人设都会参考其他主要角色，张力位置不重复；全部写完后在页面底部写“角色关系网”。</div>' : ''}
+${styleRowHtml()}
+<div class="cw-dim cw-small">想只改一小段：在框里选中那段，下面会出现“局部重写”。</div>`;
     (d.qa?.chars ?? []).forEach((c, ci) => {
         html += `<div class="cw-box"><div class="cw-sub">${esc(c.name)} 的问题</div>${c.questions.map((q, qi) => `<div class="cw-q"><div class="cw-qt">${esc(q.q)}</div>
 ${answerHtml(`qa.chars.${ci}.questions.${qi}.answer`, q.options, '或者自己写；留空让 AI 决定')}</div>`).join('')}</div>`;
@@ -492,7 +649,8 @@ ${answerHtml(`qa.chars.${ci}.questions.${qi}.answer`, q.options, '或者自己�
     d.personas.forEach((p, i) => {
         const pr = d.predict?.[p.name];
         html += `<div class="cw-card">
-<div class="cw-row">${inp(`personas.${i}.name`, '名字', 'cw-grow')}${btn('persona', p.text ? '重写' : '生成', `data-i="${i}"`)}</div>
+<div class="cw-row">${inp(`personas.${i}.name`, '名字（空着让 AI 起）', 'cw-grow')}${btn('persona', p.text ? '重写' : '写这个角色', `data-i="${i}" ${p.text ? '' : 'class="cw-primary"'}`)}${!p.text || p.added ? btn('del', '删', `data-path="personas" data-i="${i}"`) : ''}</div>
+${inp(`personas.${i}.desc`, '一句设想：TA 是谁、和〔user〕和其他人什么关系（可空，空着让 AI 补一个卡里缺的人）')}
 ${listInp(`personas.${i}.keys`, '别名/称呼（绿灯关键词，逗号分隔）')}
 ${toolsHtml(`persona:${p.name}`, !!p.text)}
 <div class="cw-sub">概要 <small class="cw-dim">${place === 'green' ? '蓝灯常驻' : '给后面步骤参考，不单独导入'}</small></div>${ta(`personas.${i}.overview`, 3)}
@@ -502,10 +660,15 @@ ${clicheHtml(p.text, i)}
 ${d.au ? auCheckHtml(p, i) : ''}
 <div class="cw-row">${btn('predict', pr ? '再测一次' : '可预测性测试', `data-i="${i}"`)}${pr?.overlaps?.length ? btn('destale', `重写撞车的 ${pr.overlaps.length} 处`, `data-i="${i}" class="cw-primary"`) : ''}</div>
 <div class="cw-dim cw-small">先让 AI 只看标签猜这类角色的刻板写法，再按意思比对人设。2 次调用。</div>
-${pr ? `<div class="cw-box cw-small">${pr.rewritten ? '<span class="cw-badge ok">撞车的部分已重写，可以再测一次</span>' : pr.overlaps.length ? pr.overlaps.map((o) => `<div class="cw-ov">卡里：<b>${esc(o.card)}</b><br><span class="cw-dim">撞上的刻板写法：${esc(o.text)}</span></div>`).join('') : '<span class="cw-badge ok">没撞上</span>'}
+${pr ? `<div class="cw-box cw-small">${pr.rewritten ? `<span class="cw-badge ok">撞车的部分已重写，可以再测一次</span>${pr.fixed?.length ? `<div class="cw-dim">针对的是：${pr.fixed.map((f) => `「${esc(f.card)}」`).join('')}。改成了什么见上面“改了什么”。</div>` : ''}` : pr.overlaps.length ? pr.overlaps.map((o) => `<div class="cw-ov">卡里：<b>${esc(o.card)}</b><br><span class="cw-dim">撞上的刻板写法：${esc(o.text)}</span></div>`).join('') : '<span class="cw-badge ok">没撞上</span>'}
 ${pr.predicted ? `<details class="cw-mini"><summary>AI 猜的刻板写法</summary>${[...(pr.predicted.scenes ?? []).map((sc) => `${sc.scene}：${sc.behavior ?? ''}${sc.line ? `「${sc.line}」` : ''}`), ...(pr.predicted.traits ?? [])].map((x) => `<div>· ${esc(x)}</div>`).join('')}</details>` : ''}</div>` : ''}
 </div>`;
     });
+    if (d.personas.length > 1 || mode === 'multi') {
+        html += `<div class="cw-card"><div class="cw-row"><b class="cw-grow">角色关系网</b>${btn('relations', d.relations ? '重写' : '生成', d.personas.filter((p) => p.text).length > 1 && !d.relations ? 'class="cw-primary"' : '')}</div>
+<div class="cw-dim cw-small">多人卡最容易跑成单人卡：AI 只盯着一个人演。这一块写清主要角色之间的关系和账、修罗场怎么触发、一次回复里怎么安排几个人出场、群戏里各自说话的区别。蓝灯常驻，放在人设后面。</div>
+${toolsHtml('relations', !!d.relations)}${ta('relations', 10, '<角色关系>…</角色关系>')}</div>`;
+    }
     return html;
 }
 
@@ -520,9 +683,12 @@ ${d.world.extra.map((e, i) => `<div class="cw-card"><div class="cw-row">${inp(`w
 
 function npcHtml() {
     const d = draft();
-    return `<div class="cw-row">${btn('npc', d.npcs.length ? '重写全部' : '生成 NPC')}${btn('add', '手动加一个', 'data-path="npcs" data-tpl="npc"')}</div>
+    return `<div class="cw-row">${btn('npc', d.npcs.length ? '重写全部' : '生成 NPC')}${btn('add', '加一个 NPC', 'data-path="npcs" data-tpl="npc"')}</div>
+<div class="cw-dim cw-small">加一个 NPC 后，可以先写名字和一句设想（比如“宫里的老太医，知道母蛊的来历”），点“写这个 NPC”只写这一个，别的不动；名字和设想都空着就让 AI 想一个这张卡缺的。</div>
 ${toolsHtml('npc', d.npcs.length > 0)}
-${d.npcs.map((n, i) => `<div class="cw-card"><div class="cw-row">${inp(`npcs.${i}.name`, '名字', 'cw-grow')}${btn('del', '删', `data-path="npcs" data-i="${i}"`)}</div>${listInp(`npcs.${i}.keys`)}${ta(`npcs.${i}.content`, 7)}</div>`).join('')}`;
+${d.npcs.map((n, i) => `<div class="cw-card"><div class="cw-row">${inp(`npcs.${i}.name`, '名字（空着让 AI 起）', 'cw-grow')}${btn('npcOne', n.content?.trim() ? '重写这个' : '写这个 NPC', `data-i="${i}" ${n.content?.trim() ? '' : 'class="cw-primary"'}`)}${btn('del', '删', `data-path="npcs" data-i="${i}"`)}</div>
+${inp(`npcs.${i}.desc`, '一句设想：他是谁、在剧情里干什么（可空）')}
+${listInp(`npcs.${i}.keys`)}${ta(`npcs.${i}.content`, 7)}</div>`).join('')}`;
 }
 
 function routesHtml() {
@@ -699,7 +865,7 @@ const STEP_TEMPLATE = '【任务】为这张卡写……\n\n【构想】\n{{conc
 function promptsHtml() {
     const s = settings();
     const opt = (v, label, cur) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(label)}</option>`;
-    const tabs = [['step', '每一步的提示词'], ['rule', '规则库'], ['tag', '我的标签'], ['mine', '我的步骤'], ['intro', '简介风格']];
+    const tabs = [['step', '每一步的提示词'], ['rule', '规则库'], ['style', '文风'], ['tag', '我的标签'], ['mine', '我的步骤'], ['intro', '简介风格']];
     let body = '';
     if (state.ptab === 'step') {
         const id = state.editStep;
@@ -707,13 +873,38 @@ function promptsHtml() {
 <select class="text_pole cw-step-sel">${Object.keys(DEFAULT_PROMPTS).map((k) => opt(k, `${STEP_INFO[k]?.name ?? k}${s.prompts[k]?.trim() ? '（已改）' : ''}`, id)).join('')}</select>
 <textarea class="text_pole cw-ta cw-step-ta" rows="16">${esc(s.prompts[id]?.trim() ? s.prompts[id] : DEFAULT_PROMPTS[id])}</textarea>
 <div class="cw-row">${btn('resetStep', '恢复这一步的默认')}</div>
-<details class="cw-mini"><summary>可用变量</summary><div class="cw-small">${Object.entries(TEMPLATE_VARS).map(([k, v]) => `<code>{{${esc(k)}}}</code> ${esc(v)}`).join('<br>')}</div></details>`;
+<details class="cw-mini"><summary>可用变量</summary><div class="cw-small">${Object.entries(TEMPLATE_VARS).map(([k, v]) => `<code>{{${esc(k)}}}</code> ${esc(v)}`).join('<br>')}</div></details>
+<div class="cw-sub">目录里的步骤</div>
+<div class="cw-dim cw-small">用不上的步骤可以关掉：目录里不显示，一键出卡也跳过。随时可以再打开，写好的内容不会丢。</div>
+<div class="cw-chips">${PAGES.filter((pg) => OPTIONAL_PAGES.includes(pg.id)).map((pg) => `<label class="cw-chip ${(s.offPages ?? []).includes(pg.id) ? '' : 'on'}"><input type="checkbox" class="cw-pageon" data-page="${pg.id}" ${(s.offPages ?? []).includes(pg.id) ? '' : 'checked'}>${esc(pg.name)}</label>`).join('')}</div>`;
     } else if (state.ptab === 'rule') {
-        const k = state.editRule;
-        body = `<div class="cw-dim cw-small">规则库被多个步骤共用（提示词里写 {{rules.名称}} 的地方），改一处全部生效。你教程里的写法规则可以直接粘进来。</div>
-<select class="text_pole cw-rule-sel">${Object.keys(DEFAULT_RULES).map((r) => opt(r, `${r}${s.rules[r]?.trim() ? '（已改）' : ''}`, k)).join('')}</select>
-<textarea class="text_pole cw-ta cw-rule-ta" rows="14">${esc(s.rules[k]?.trim() ? s.rules[k] : DEFAULT_RULES[k])}</textarea>
-<div class="cw-row">${btn('resetRule', '恢复这条规则的默认')}</div>`;
+        const list = flow.ruleList();
+        if (!list.some((r) => r.name === state.editRule)) state.editRule = list[0]?.name;
+        const r = list.find((x) => x.name === state.editRule);
+        const k = r.name;
+        const inPrompt = Object.keys(DEFAULT_PROMPTS).filter((id) => {
+            const tpl = s.prompts[id]?.trim() ? s.prompts[id] : DEFAULT_PROMPTS[id];
+            return tpl.includes(`{{rules.${k}}}`) || (k === '人设模板' && tpl.includes('{{template}}'));
+        });
+        const stepName = (id) => STEP_INFO[id]?.name ?? id;
+        const tag = (x) => `${x.name}${!x.builtin ? '（自己加的）' : x.edited ? '（已改）' : ''}${x.on ? '' : '（关）'}${x.mode !== 'all' ? `（${CARD_MODES[x.mode]?.slice(0, 3) ?? x.mode}）` : ''}`;
+        body = `<div class="cw-dim cw-small">规则库里每一条都是一个可以插拔的模块：可以开关、改内容、限定只给某种卡用、插到任意步骤里。提示词里写了 {{rules.名称}} 的步骤会在那个位置用它；“另外插到”的步骤会把它加在提示词最后。也可以新建自己的规则（比如你的世界观教程、某个题材的写法）。</div>
+<select class="text_pole cw-rule-sel">${list.map((x) => opt(x.name, tag(x), k)).join('')}</select>
+<div class="cw-row"><label class="checkbox_label"><input type="checkbox" class="cw-rule-on" ${r.on ? 'checked' : ''}>启用</label>
+<select class="text_pole cw-rule-mode" style="width:auto">${[['all', '所有卡都用'], ['single', '只用于单人卡'], ['multi', '只用于多人卡'], ['world', '只用于世界卡']].map(([v, n]) => opt(v, n, r.mode)).join('')}</select></div>
+${k === '人设模板' ? '<div class="cw-dim cw-small">写人设时让 AI 照着填的模板。{{name}} 会换成角色名。用不上的字段 AI 会删掉。</div>' : ''}
+<textarea class="text_pole cw-ta cw-rule-ta" rows="14">${esc(r.text)}</textarea>
+<div class="cw-small">写在这些步骤的提示词里：${inPrompt.length ? inPrompt.map((id) => `<span class="cw-badge">${esc(stepName(id))}</span>`).join(' ') : '<span class="cw-dim">没有</span>'}</div>
+<details class="cw-mini" ${r.steps.length ? 'open' : ''}><summary>另外插到这些步骤（${r.steps.length} 个）</summary><div class="cw-chips">${Object.keys(DEFAULT_PROMPTS).filter((id) => !inPrompt.includes(id)).map((id) => `<label class="cw-chip ${r.steps.includes(id) ? 'on' : ''}"><input type="checkbox" class="cw-rulestep" data-step="${id}" ${r.steps.includes(id) ? 'checked' : ''}>${esc(stepName(id))}</label>`).join('')}</div></details>
+<div class="cw-row">${r.builtin ? btn('resetRule', '恢复这条的默认') : btn('delRule', '删除这条规则')}</div>
+<div class="cw-row"><input class="text_pole cw-in cw-grow cw-newrule" placeholder="新规则的名字，比如：世界观写法、宫斗题材"> ${btn('addRule', '新建规则')}</div>`;
+    } else if (state.ptab === 'style') {
+        body = `<div class="cw-dim cw-small">文风只管“怎么写”：用词、句子长短、语气、比喻多不多。可以存好几个，在“主要人设”页顶部给每张卡选一个。选了之后，写人设、展开经历、重写撞车、按意见改人设、局部重写人设都会带上；勾“其他也用”时世界观、NPC、路线、模块、开场白也带上。格式要求（YAML、标签）不受影响。</div>
+${(settings().styles ?? []).map((x, i) => `<div class="cw-card">
+<input class="text_pole cw-in cw-stname" data-i="${i}" value="${esc(x.name)}" placeholder="文风名">
+<textarea class="text_pole cw-ta cw-sttext" data-i="${i}" rows="8" placeholder="比如：\n- 短句，少用形容词，动作和对白多于心理描写\n- 口语化，像在讲别人的八卦\n- 可以粘一段你喜欢的文字当样例，写明“学它的语气，不抄内容”">${esc(x.text)}</textarea>
+<div class="cw-row cw-end">${btn('delStyle', '删除这个文风', `data-i="${i}"`)}</div></div>`).join('')}
+<div class="cw-row">${btn('addStyle', '新建一个文风')}</div>`;
     } else if (state.ptab === 'tag') {
         body = `<div class="cw-dim cw-small">每行一个：名称|触发词,触发词。触发词出现在一句话脑洞里就自动勾上。</div>
 <select class="text_pole cw-dim-sel">${lib().map((d) => opt(d.key, d.name, state.editDim)).join('')}</select>
@@ -799,7 +990,8 @@ const routeAt = (i) => draft().routes[i] ?? { name: '主线' };
 
 const TEMPLATES = {
     extra: () => ({ name: '', keys: [], content: '' }),
-    npc: () => ({ name: '', keys: [], content: '' }),
+    npc: () => ({ name: '', desc: '', keys: [], content: '' }),
+    persona: () => ({ name: '', desc: '', keys: [], overview: '', text: '', added: true }),
     route: () => ({ name: `路线${draft().routes.length + 1}`, user: '', period: '', info: '' }),
     free: () => ({ name: '', desc: '', content: '', light: 'blue', keys: [], position: 'after' }),
 };
@@ -813,6 +1005,7 @@ async function autoRun() {
     }
     await step(async () => {
         const tick = () => { saveDraft(); renderAll(); setBusy(true); };
+        const on = (id) => !(s.offPages ?? []).includes(id);
         // 勾了“一键出卡时也跑”的我的步骤，跟在对应那一步后面
         const mine = async (after) => {
             for (const st of s.customSteps ?? []) {
@@ -870,25 +1063,28 @@ async function autoRun() {
         if (!d.concepts.length) { await flow.idea(d); tick(); }
         if (d.pick < 0 || !d.concepts[d.pick]) { flow.pickConcept(d, 0); tick(); }
         await mine('idea'); await mine('tags');
-        for (const p of d.personas) {
-            if (!p.text) { setStatus(`人设：${esc(p.name)}…`); await flow.persona(d, p.name); tick(); }
+        for (let i = 0; i < d.personas.length; i++) {
+            const p = d.personas[i];
+            if (!p.text) { setStatus(`人设：${esc(p.name || '新角色')}…`); await flow.persona(d, i); tick(); }
             if (s.autoBackstory && thinLifeStory(p.text)) { setStatus(`展开经历：${esc(p.name)}…`); await flow.backstory(d, p.name); tick(); }
         }
+        if (d.personas.filter((p) => p.text).length > 1 && !d.relations) { setStatus('角色关系网…'); await flow.relations(d); tick(); }
         await mine('persona');
-        if (!d.world.main) { await flow.world(d); tick(); }
+        if (on('world') && !d.world.main) { await flow.world(d); tick(); }
         await mine('world');
-        if (!d.npcs.length && (d.concepts[d.pick]?.npcs ?? 0) > 0) { await flow.npc(d); tick(); }
+        if (on('npc') && !d.npcs.length && ((d.concepts[d.pick]?.npcs ?? 0) > 0 || flow.modeOf(d) === 'world')) { await flow.npc(d); tick(); }
         await mine('npc');
-        if (d.routes.some((r) => !r.info)) { await flow.routes(d); tick(); }
+        if (on('routes') && d.routes.some((r) => !r.info)) { await flow.routes(d); tick(); }
         await mine('routes');
-        if (!d.tone) { await flow.tone(d); tick(); }
+        if (on('tone') && !d.tone) { await flow.tone(d); tick(); }
         await mine('tone');
+        if (!d.routes.length) d.routes = [{ name: '主线', user: '', period: '', info: '' }];
         for (let i = 0; i < d.routes.length; i++) {
             if (!d.greetings.some((g) => g.route === d.routes[i].name)) { setStatus(`开场白：${esc(d.routes[i].name)}…`); await greetClean(() => flow.greetings(d, i)); tick(); }
         }
         await mine('greet');
-        if (s.autoPredict) {
-            for (const p of d.personas) {
+        if (s.autoPredict && on('check')) {
+            for (const p of d.personas.filter((x) => x.text)) {
                 setStatus(`可预测性测试：${esc(p.name)}…`);
                 const r = await flow.predict(d, p.name);
                 if (r.overlaps.length) await flow.destale(d, p.name);
@@ -950,7 +1146,7 @@ async function greetClean(fn) {
 function pageHistoryKeys(d, id) {
     if (id.startsWith('step:')) return d.free.filter((f) => `step:${f.fromStep}` === id).map((f) => `free:${f.name}`);
     return {
-        persona: () => d.personas.map((p) => `persona:${p.name}`),
+        persona: () => [...d.personas.map((p) => `persona:${p.name}`), 'relations'],
         world: () => ['world'],
         npc: () => ['npc'],
         routes: () => ['routes'],
@@ -1171,6 +1367,7 @@ function pushHistory() {
 const ACTIONS = {
     go: (el) => {
         state.page = el.dataset.page || 'home';
+        if (el.dataset.tab) state.ptab = el.dataset.tab;
         if (!state.busy) state.lastStatus = '';
         renderAll();
         const box = state.root?.closest?.('.popup-content, .popup-body, dialog');
@@ -1257,7 +1454,34 @@ const ACTIONS = {
         if (flow.restore(draft(), el.dataset.key)) { saveDraft(); state.lastStatus = '换回上一版了。再点一次会继续往前换，换一圈回到最新的。'; renderAll(); }
     },
     resetStep: () => { settings().prompts[state.editStep] = ''; save(); renderAll(); },
-    resetRule: () => { settings().rules[state.editRule] = ''; save(); renderAll(); },
+    resetRule: () => {
+        const s = settings();
+        const k = state.editRule;
+        s.rules[k] = '';
+        delete s.ruleOff[k]; delete s.ruleModes[k]; delete s.ruleSteps[k];
+        save(); renderAll();
+    },
+    addRule: () => {
+        const s = settings();
+        const name = String($(state.root).find('.cw-newrule').val() ?? '').trim();
+        if (!name) return toastr.info('先写规则的名字', '写卡工坊');
+        if (/[{}.\s]/.test(name)) return toastr.warning('名字里不要有空格、点和花括号', '写卡工坊');
+        if (name in DEFAULT_RULES || name in s.customRules) return toastr.warning('已经有同名的规则了', '写卡工坊');
+        s.customRules[name] = '';
+        s.ruleSteps[name] = [];
+        state.editRule = name;
+        save(); renderAll();
+    },
+    delRule: async () => {
+        const c = getCtx();
+        const s = settings();
+        const k = state.editRule;
+        if (k in DEFAULT_RULES) return;
+        if (!(await c.callGenericPopup(`删除规则“${esc(k)}”？`, c.POPUP_TYPE.CONFIRM))) return;
+        delete s.customRules[k]; delete s.ruleOff[k]; delete s.ruleModes[k]; delete s.ruleSteps[k];
+        state.editRule = '通用';
+        save(); renderAll();
+    },
     addStep: () => {
         settings().customSteps.push({ id: `step${Date.now().toString(36)}`, name: '', stage: 'card', light: 'blue', position: 'after', keys: [], template: STEP_TEMPLATE, output: 'free', after: 'tone', auto: false });
         save(); renderAll();
@@ -1267,6 +1491,39 @@ const ACTIONS = {
         state.abort = true;
         try { getCtx().stopGeneration?.(); } catch { /* ignore */ }
         setStatus('正在停止…');
+    },
+    openDraft: (el) => {
+        const s = settings();
+        const pick = s.drafts[Number(el.dataset.i)];
+        if (!pick) return;
+        pushHistory();
+        s.drafts = (s.drafts ?? []).filter((x) => x.id !== pick.id);
+        s.draft = structuredClone(pick);
+        state.checks = null; state.bagu = null;
+        saveDraft(); renderAll();
+    },
+    delDraft: async (el) => {
+        const c = getCtx();
+        const s = settings();
+        const x = s.drafts[Number(el.dataset.i)];
+        if (!x) return;
+        if (!(await c.callGenericPopup(`删除草稿“${esc(x.name || x.idea?.slice(0, 16) || '未命名')}”？删了找不回来。`, c.POPUP_TYPE.CONFIRM))) return;
+        s.drafts.splice(Number(el.dataset.i), 1);
+        save(); renderAll();
+    },
+    delCurrent: async () => {
+        const c = getCtx();
+        if (!(await c.callGenericPopup('删除当前草稿？不会放进历史草稿，删了找不回来。已经导入酒馆的卡和世界书不受影响。', c.POPUP_TYPE.CONFIRM))) return;
+        settings().draft = emptyDraft();
+        state.checks = null; state.bagu = null; state.page = 'home'; state.lastStatus = '当前草稿已删除。';
+        saveDraft(); renderAll();
+    },
+    clearDrafts: async () => {
+        const c = getCtx();
+        const s = settings();
+        if (!(await c.callGenericPopup(`清空全部 ${s.drafts.length} 份历史草稿？当前草稿不动。删了找不回来。`, c.POPUP_TYPE.CONFIRM))) return;
+        s.drafts = [];
+        save(); renderAll();
     },
     newDraft: async () => {
         const c = getCtx();
@@ -1324,12 +1581,27 @@ const ACTIONS = {
         saveDraft(); renderAll();
     },
     qa: () => step(() => flow.qa(draft()), '点选答案或自己写，然后生成人设。'),
-    persona: (el) => { const p = draft().personas[Number(el.dataset.i)]; return step(() => flow.persona(draft(), p.name), `${esc(p.name)} 的人设写好了。`); },
-    allPersonas: () => step(async () => { for (const p of draft().personas) { setStatus(`人设：${esc(p.name)}…`); await flow.persona(draft(), p.name); saveDraft(); } }, '人设都写好了。'),
+    persona: (el) => step(async () => {
+        const d = draft();
+        const i = Number(el.dataset.i);
+        const fresh = !d.personas[i]?.text?.trim();
+        const others = d.personas.filter((x, k) => k !== i && x.text?.trim()).length;
+        await flow.persona(d, i);
+        const p = d.personas[i];
+        const hints = [];
+        if (fresh && others) {
+            if (d.relations) hints.push('角色关系网里还没有 TA，到页面底部重写一下');
+            if (d.routes.some((r) => r.info?.trim())) hints.push('路线的玩家信息里还没有 TA，可以到“玩家与路线”重写，或者用局部重写补上');
+        }
+        return `${esc(p.name)} 的人设写好了。${hints.length ? `<br><span class="cw-warntext">${hints.join('；')}。</span>` : ''}`;
+    }),
+    allPersonas: () => step(async () => { const d = draft(); for (let i = 0; i < d.personas.length; i++) { setStatus(`人设：${esc(d.personas[i].name || '新角色')}…`); await flow.persona(d, i); saveDraft(); } }, '人设都写好了。'),
     predict: (el) => { const p = draft().personas[Number(el.dataset.i)]; return step(() => flow.predict(draft(), p.name), '测试完了，结果在角色下面。'); },
-    destale: (el) => { const p = draft().personas[Number(el.dataset.i)]; return step(() => flow.destale(draft(), p.name), '撞车的部分重写了，已重新比对。'); },
+    destale: (el) => { const p = draft().personas[Number(el.dataset.i)]; return step(async () => { const n = await flow.destale(draft(), p.name); return `撞车的部分重写了，改了 ${n} 处，在人设框上面“改了什么”里看。`; }); },
     world: () => step(() => flow.world(draft()), '世界观写好了。'),
     npc: () => step(() => flow.npc(draft()), 'NPC 写好了。'),
+    relations: () => step(() => flow.relations(draft()), '角色关系网写好了。'),
+    npcOne: (el) => step(async () => { const n = await flow.npcOne(draft(), Number(el.dataset.i)); return `${esc(n.name)} 写好了，别的 NPC 没动。`; }),
     routes: () => step(() => flow.routes(draft()), '路线信息写好了。'),
     tone: () => step(() => flow.tone(draft()), '基调与规则写好了。'),
     free: (el) => step(() => flow.free(draft(), Number(el.dataset.i)), '模块写好了。'),
@@ -1346,6 +1618,18 @@ const ACTIONS = {
         renderAll();
     },
     baguFix: () => step(baguFix, '八股清理完成。'),
+    localEdit: () => step(async () => {
+        const d = draft();
+        const sel = state.sel;
+        if (!sel) throw new Error('先在框里选中要改的那段');
+        const k = keyOfPath(d, sel.path) ?? {};
+        const r = await flow.localEdit(d, { ...sel, instruction: state.selNote ?? '', key: k.key, label: k.label });
+        state.sel = null;
+        state.selNote = '';
+        return `改好了这一段（${[...r.before.trim()].length} 字 → ${[...r.after.trim()].length} 字）。${k.key ? '原来的和现在的在这一块上面“改了什么”里看，不满意点“换回上一版”。' : ''}`;
+    }),
+    addStyle: () => { settings().styles.push({ name: `文风 ${settings().styles.length + 1}`, text: '' }); save(); renderAll(); },
+    delStyle: (el) => { const i = Number(el.dataset.i); settings().styles.splice(i, 1); const d = draft(); if (Number(d.style) === i + 1) d.style = 0; else if (Number(d.style) > i + 1) d.style -= 1; save(); saveDraft(); renderAll(); },
     playStart: () => { const d = draft(); flow.playStart(d, Number(d.play?.greet ?? 0)); saveDraft(); renderAll(); },
     playSend: () => step(async () => {
         const d = draft();
@@ -1435,6 +1719,25 @@ function bindPopup(root) {
         }
         saveDraft();
     });
+    $root.on('select keyup mouseup touchend', 'textarea[data-bind]', function () { const el = this; setTimeout(() => updateSelBar(el), 0); });
+    // 手机上长按选字不一定触发 select，再听一下 selectionchange
+    if (!state.selListen) {
+        state.selListen = true;
+        let t = null;
+        document.addEventListener('selectionchange', () => {
+            const el = document.activeElement;
+            if (!el?.matches?.('textarea[data-bind]') || !state.root?.contains(el)) return;
+            clearTimeout(t);
+            t = setTimeout(() => updateSelBar(el), 150);
+        });
+    }
+    $root.on('input', 'textarea[data-bind]', function () { $(this).nextAll('.cw-selbar').first().remove(); });
+    $root.on('input', '.cw-selin', function () { state.selNote = this.value; });
+    $root.on('change', 'select[data-bind="mode"]', () => setTimeout(renderAll, 0));
+    $root.on('change', '.cw-stylesel', function () { draft().style = Number(this.value) || 0; saveDraft(); renderAll(); });
+    $root.on('change', '.cw-styleall', function () { draft().styleAll = this.checked; saveDraft(); });
+    $root.on('input', '.cw-stname', function () { const x = settings().styles[Number(this.dataset.i)]; if (x) { x.name = this.value; save(); } });
+    $root.on('input', '.cw-sttext', function () { const x = settings().styles[Number(this.dataset.i)]; if (x) { x.text = this.value; save(); } });
     $root.on('input', '[data-bind-list]', function () {
         setPath(draft(), this.dataset.bindList, this.value.split(/[,，、]/).map((x) => x.trim()).filter(Boolean));
         saveDraft();
@@ -1449,7 +1752,27 @@ function bindPopup(root) {
     $root.on('change', '.cw-step-sel', function () { state.editStep = this.value; renderAll(); });
     $root.on('input', '.cw-step-ta', function () { S().prompts[state.editStep] = this.value.trim() === DEFAULT_PROMPTS[state.editStep].trim() ? '' : this.value; save(); });
     $root.on('change', '.cw-rule-sel', function () { state.editRule = this.value; renderAll(); });
-    $root.on('input', '.cw-rule-ta', function () { S().rules[state.editRule] = this.value.trim() === DEFAULT_RULES[state.editRule].trim() ? '' : this.value; save(); });
+    $root.on('input', '.cw-rule-ta', function () {
+        const k = state.editRule;
+        if (k in DEFAULT_RULES) S().rules[k] = this.value.trim() === DEFAULT_RULES[k].trim() ? '' : this.value;
+        else S().customRules[k] = this.value;
+        save();
+    });
+    $root.on('change', '.cw-rule-on', function () { S().ruleOff[state.editRule] = !this.checked; if (this.checked) delete S().ruleOff[state.editRule]; save(); renderAll(); });
+    $root.on('change', '.cw-rule-mode', function () { S().ruleModes[state.editRule] = this.value; save(); renderAll(); });
+    $root.on('change', '.cw-rulestep', function () {
+        const r = flow.ruleList().find((x) => x.name === state.editRule);
+        const set = new Set(r?.steps ?? []);
+        if (this.checked) set.add(this.dataset.step); else set.delete(this.dataset.step);
+        S().ruleSteps[state.editRule] = [...set];
+        save(); renderAll();
+    });
+    $root.on('change', '.cw-pageon', function () {
+        const off = new Set(S().offPages ?? []);
+        if (this.checked) off.delete(this.dataset.page); else off.add(this.dataset.page);
+        S().offPages = [...off];
+        save(); renderAll();
+    });
     $root.on('change', '.cw-dim-sel', function () { state.editDim = this.value; renderAll(); });
     $root.on('input', '.cw-dim-ta', function () { S().customTags[state.editDim] = this.value.split('\n').map((x) => x.trim()).filter(Boolean); save(); });
     $root.on('input change', '[data-step]', function () {
@@ -1491,17 +1814,6 @@ function bindPopup(root) {
     });
     $root.on('input', '.cw-isname', function () { const x = S().introStyles[Number(this.dataset.i)]; if (x) { x.name = this.value; save(); } });
     $root.on('input', '.cw-istpl', function () { const x = S().introStyles[Number(this.dataset.i)]; if (x) { x.tpl = this.value; save(); } });
-    $root.on('change', '.cw-hist', function () {
-        const i = Number(this.value);
-        if (this.value === '') return;
-        const s = settings();
-        const pick = s.drafts[i];
-        pushHistory();
-        s.drafts = (s.drafts ?? []).filter((x) => x.id !== pick.id);
-        s.draft = structuredClone(pick);
-        state.checks = null; state.bagu = null;
-        saveDraft(); renderAll();
-    });
 }
 
 async function openWorkshop() {
@@ -1563,6 +1875,8 @@ function settingsPageHtml() {
 <label>商用<input class="text_pole cw-in" data-set="license.commercial" value="${esc(s.license.commercial)}"></label>
 <label>预设参考<input class="text_pole cw-in" data-set="presetNote" value="${esc(s.presetNote)}" placeholder="空着就写开场白预设的名字"></label>
 <label>其他说明<input class="text_pole cw-in" data-set="introNotes" value="${esc(s.introNotes)}"></label>
+<label>额外致谢<small class="cw-dim">每行一条，会加在简介的致谢里</small><textarea class="text_pole cw-in" rows="3" data-set="introThanks" placeholder="感谢某某老师的预设">${esc(s.introThanks)}</textarea></label>
+<div class="cw-dim cw-small">简介的致谢里一定会写“${esc(CREDIT_WORKSHOP)}”；人设模板没改过时还会写“感谢灰鸠老师的人设模板”，在规则库里改了或关掉人设模板就自动去掉。</div>
 </div>`;
 }
 

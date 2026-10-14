@@ -128,6 +128,11 @@ await check('可预测性：撞车的句子被找出来，重写后复查', asyn
     assert.ok(sent.at(-1).user.includes('宣示主权'));
     assert.equal(d.predict['迟春'].overlaps.length, 0);
     assert.equal(d.predict['迟春'].rewritten, true);
+    const ch = d.changes['persona:迟春'];
+    assert.ok(ch.how.includes('撞车'));
+    assert.ok(ch.hunks.some((h) => h.before.includes('宣示主权') && h.after.includes('还回去')), '记下原来 → 现在');
+    assert.equal(d.predict['迟春'].fixed.length, 2);
+    assert.ok(d.history['persona:迟春'].length, '能换回去');
 });
 
 await check('本地质检和文本位置', () => {
@@ -320,6 +325,164 @@ await check('每一页的八股检查：每块文字都知道自己在哪一页�
     assert.ok(intro.length && intro.every((x) => x.introPart));
     intro[0].set('改过');
     assert.equal(Object.values(d.intro.parts)[0] === '改过' || Object.values(d.intro.parts).includes('改过'), true);
+});
+
+await check('单独写一个 NPC：带上名字和设想、别的 NPC，只改这一个', async () => {
+    const before = d.npcs.map((n) => n.content);
+    d.npcs.push({ name: '', desc: '宫里的老太医，知道母蛊的来历', keys: [], content: '' });
+    const i = d.npcs.length - 1;
+    replies.push('<<<NPC:秦太医|太医,老秦>>>\n<秦太医>\n身份: 太医\n功能: 提供信息\n</秦太医>');
+    const n = await flow.npcOne(d, i);
+    assert.equal(n.name, '秦太医', '名字空着用 AI 起的');
+    assert.deepEqual(n.keys, ['太医', '老秦']);
+    assert.ok(n.content.includes('提供信息'));
+    const u = sent.at(-1).user;
+    assert.ok(u.includes('宫里的老太医') && u.includes('（你来起）'));
+    assert.ok(u.includes(d.npcs[0].name), '带上已有的 NPC');
+    assert.deepEqual(d.npcs.slice(0, i).map((x) => x.content), before, '别的不动');
+    replies.push('<<<NPC:别的名字|x>>>\n<秦太医>\n身份: 太医\n功能: 制造阻碍\n</秦太医>');
+    await flow.npcOne(d, i);
+    assert.equal(d.npcs[i].name, '秦太医', '已经有名字就不换');
+    assert.ok(d.changes.npc.hunks.some((h) => h.after.includes('制造阻碍')), '重写时显示改了什么');
+    flow.restore(d, 'npc');
+    assert.ok(d.npcs[i].content.includes('提供信息'), '换回上一版');
+    d.npcs.splice(i, 1);
+});
+
+await check('新加一个主要角色：写设想、名字空着让 AI 起；参考已有角色；能写进人设条目', async () => {
+    const e = { ...emptyDraft(), name: '勇者和魔王', personas: [{ name: '魔王', keys: [], overview: '魔王，想退休', text: '<魔王>x</魔王>' }, { name: '', desc: '勇者的师父，其实是上一任魔王', keys: [], overview: '', text: '' }] };
+    replies.push('<<<名字>>>\n老塞\n<<<概要>>>\n〔新角色〕是勇者的师父。\n<<<人设>>>\n<〔新角色〕>\n身份: 上一任魔王\n</〔新角色〕>');
+    await flow.persona(e, 1);
+    const u = sent.at(-1).user;
+    assert.ok(u.includes('勇者的师父，其实是上一任魔王') && u.includes('<<<名字>>>'), '带上设想，让 AI 起名');
+    assert.ok(u.includes('魔王：魔王，想退休'), '参考已有角色');
+    const p = e.personas[1];
+    assert.equal(p.name, '老塞');
+    assert.equal(p.overview, '老塞是勇者的师父。');
+    assert.equal(p.text, '<老塞>\n身份: 上一任魔王\n</老塞>');
+    const { buildEntries } = await import('../src/assemble.js');
+    assert.ok(buildEntries(e).some((x) => x.comment === '人设·老塞'));
+    // 有名字但没设想、也没构想身份：告诉 AI 这是新加的角色
+    e.personas.push({ name: '公主', keys: [], overview: '', text: '' });
+    replies.push('<<<概要>>>\n公主。\n<<<人设>>>\n<公主>\ny\n</公主>');
+    await flow.persona(e, '公主');
+    assert.ok(sent.at(-1).user.includes('这是新加进来的角色'));
+});
+
+await check('卡的类型：标签和人数自动判断，作者选的优先', () => {
+    const m = (tags, extra = {}) => flow.modeOf({ ...emptyDraft(), tags, ...extra });
+    assert.equal(m([]), 'single');
+    assert.equal(m([{ dim: 'count', name: 'NP' }]), 'multi');
+    assert.equal(m([{ dim: 'count', name: '群像' }]), 'multi');
+    assert.equal(m([{ dim: 'cardType', name: '世界卡' }]), 'world');
+    assert.equal(m([], { personas: [{ name: 'a' }, { name: 'b' }] }), 'multi');
+    assert.equal(m([{ dim: 'count', name: 'NP' }], { mode: 'single' }), 'single', '作者选的优先');
+});
+
+await check('规则库可插拔：关掉、插到别的步骤、只给某种卡用、自己加；人设模板能换', async () => {
+    const saved = JSON.stringify({ rules: settings.rules, customRules: settings.customRules, ruleOff: settings.ruleOff, ruleModes: settings.ruleModes, ruleSteps: settings.ruleSteps });
+    const e = { ...emptyDraft(), name: '测试', personas: [{ name: '甲', keys: [], overview: '', text: '' }] };
+    // 改过又改回默认（存成空）时用默认，不是空
+    settings.rules = { 通用: '' };
+    // 自己加一条，插到世界观
+    settings.customRules = { 宫斗写法: '宫斗：每个势力背后都有一位娘娘。' };
+    settings.ruleSteps = { 宫斗写法: ['world'] };
+    replies.push('<世界观>\n概述: x\n</世界观>');
+    await flow.world(e);
+    assert.ok(sent.at(-1).user.includes('【规则·宫斗写法】') && sent.at(-1).user.includes('每个势力背后都有一位娘娘'));
+    // 关掉通用，换人设模板
+    settings.ruleOff = { 通用: true };
+    settings.rules = { 人设模板: '我的模板:\n  {{name}}:\n    核心: …' };
+    replies.push('<<<概要>>>\n甲。\n<<<人设>>>\n<甲>\n我的模板:\n</甲>');
+    await flow.persona(e, '甲');
+    let u = sent.at(-1).user;
+    assert.ok(u.includes('我的模板:\n  甲:'), '用自己的人设模板，{{name}} 换成名字');
+    assert.ok(!u.includes('只写特异点'), '关掉的规则不出现');
+    assert.ok(!u.includes('【规则·多人卡】'), '单人卡不带多人卡规则');
+    // 多人卡：多人卡规则自动插进人设
+    settings.ruleOff = {};
+    e.mode = 'multi';
+    replies.push('<<<概要>>>\n甲。\n<<<人设>>>\n<甲>\nx\n</甲>');
+    await flow.persona(e, '甲');
+    u = sent.at(-1).user;
+    assert.ok(u.includes('【规则·多人卡】') && u.includes('只写特异点'));
+    // 限定只给世界卡用：多人卡里就没有了
+    settings.ruleModes = { 宫斗写法: 'world' };
+    replies.push('<世界观>\n概述: x\n</世界观>');
+    await flow.world(e);
+    assert.ok(!sent.at(-1).user.includes('宫斗写法'));
+    const list = flow.ruleList();
+    assert.ok(list.find((r) => r.name === '宫斗写法' && !r.builtin));
+    assert.ok(list.find((r) => r.name === '人设模板' && r.builtin && r.edited));
+    Object.assign(settings, JSON.parse(saved));
+});
+
+await check('多人卡：角色关系网（常驻，在人设后面），能读回来；世界卡：NPC 至少 6 个', async () => {
+    const { buildEntries, toWorldData, cardToDraft } = await import('../src/assemble.js');
+    const e = { ...emptyDraft(), name: '三人行', mode: 'multi', personas: [{ name: '甲', keys: [], overview: '甲的概要', text: '<甲>x</甲>' }, { name: '乙', keys: [], overview: '乙的概要', text: '<乙>y</乙>' }] };
+    replies.push('<角色关系>\n关系:\n  甲 与 乙: 旧仇\n出场规则:\n  - 甲先开口\n</角色关系>');
+    await flow.relations(e);
+    assert.ok(e.relations.includes('旧仇'));
+    assert.ok(sent.at(-1).user.includes('甲的概要') && sent.at(-1).user.includes('乙的概要'));
+    const es = buildEntries(e);
+    const i = es.findIndex((x) => x.comment === '角色关系');
+    assert.ok(i > es.findIndex((x) => x.comment === '人设·乙') && es[i].constant);
+    const back = cardToDraft({ avatar: 'a.png', data: { name: '三人行', description: '' } }, toWorldData(es), '三人行');
+    assert.equal(back.relations, e.relations);
+    await assert.rejects(() => flow.relations({ ...emptyDraft(), personas: [{ name: '甲' }] }), /两个主要角色/);
+    e.routes = [{ name: '囚禁后', user: '', period: '', info: '' }];
+    replies.push('<<<路线:囚禁后>>>\n<玩家信息>x</玩家信息>');
+    await flow.routes(e);
+    const ru = sent.at(-1).user;
+    assert.ok(ru.includes('〔user〕和甲的关系：') && ru.includes('〔user〕和乙的过去：'), '每个主要角色都要写');
+    assert.ok(ru.includes('和甲、乙各自的关系') && !ru.includes('〔user〕和主要角色的关系'), '用名字，不写“主要角色”');
+    const w = { ...emptyDraft(), name: '王都', mode: 'world', concepts: [{ title: '王都', lineup: [], npcs: 2, routes: [] }], pick: 0 };
+    replies.push('<<<NPC:甲|>>>\n<甲>\n功能: x\n</甲>');
+    await flow.npc(w);
+    assert.ok(sent.at(-1).user.includes('6 个左右'), '世界卡 NPC 至少 6 个');
+    assert.ok(sent.at(-1).user.includes('【规则·世界卡】'));
+});
+
+await check('改了什么：按行比较，只列改动的地方', async () => {
+    const { diffLines } = await import('../src/diff.js');
+    assert.deepEqual(diffLines('a\nb\nc', 'a\nb\nc'), []);
+    assert.deepEqual(diffLines('a\nb\nc\nd', 'a\nB\nc\nd'), [{ before: 'b', after: 'B' }]);
+    assert.deepEqual(diffLines('a\nc', 'a\nb\nc'), [{ before: '', after: 'b' }]);
+    assert.deepEqual(diffLines('a\nb\nc', 'a\nc'), [{ before: 'b', after: '' }]);
+    assert.equal(diffLines('x\n  y', 'x\ny ').length, 0, '只差空白不算');
+});
+
+await check('局部重写：只改选中的那段，缩进和前后原样；文风只加在人设类步骤', async () => {
+    const p = d.personas[0];
+    p.text = '<迟春>\n性格:\n  - 他很温柔\n  - 每年春天去旧桥\n</迟春>';
+    const start = p.text.indexOf('  - 他很温柔');
+    const end = start + '  - 他很温柔'.length;
+    settings.styles = [{ name: '冷', text: '短句，不用形容词' }];
+    d.style = 1;
+    replies.push('【【他对谁都客气，只对〔user〕说重话】】');
+    const r = await flow.localEdit(d, { path: 'personas.0.text', start, end, instruction: '改成嘴硬', key: 'persona:迟春', label: '人设·迟春' });
+    assert.equal(p.text, '<迟春>\n性格:\n  - 他对谁都客气，只对〔user〕说重话\n  - 每年春天去旧桥\n</迟春>', 'AI 丢了列表符号也补回来');
+    assert.ok(r.after.startsWith('  '), '保留缩进');
+    const u = sent.at(-1).user;
+    assert.ok(u.includes('【【  - 他很温柔】】') && u.includes('改成嘴硬'));
+    assert.ok(u.includes('【文风】') && u.includes('短句，不用形容词'), '人设带文风');
+    assert.deepEqual(d.changes['persona:迟春'].hunks, [{ before: '- 他很温柔', after: '- 他对谁都客气，只对〔user〕说重话' }]);
+    flow.restore(d, 'persona:迟春');
+    assert.ok(p.text.includes('他很温柔'), '换回上一版');
+    await assert.rejects(() => flow.localEdit(d, { path: 'personas.0.text', start: 3, end: 3 }), /先在框里选中/);
+    p.text = 'appearance:\n  overview: 身形挺拔却清瘦。\n  attire: 红色吉服\n';
+    const s2 = p.text.indexOf('  overview');
+    replies.push('瘦，站着时总往门边靠。');
+    await flow.localEdit(d, { path: 'personas.0.text', start: s2, end: p.text.indexOf('\n  attire') + 1 });
+    assert.equal(p.text, 'appearance:\n  overview: 瘦，站着时总往门边靠。\n  attire: 红色吉服\n', 'YAML 键名和换行补回来');
+    // 世界观默认不带文风，勾了“其他也用”才带
+    assert.equal(flow.styleOf(d, 'world'), '');
+    assert.equal(flow.styleOf(d, 'persona'), '短句，不用形容词');
+    assert.equal(flow.styleOf(d, 'revise', 'persona:迟春'), '短句，不用形容词');
+    d.styleAll = true;
+    assert.equal(flow.styleOf(d, 'world'), '短句，不用形容词');
+    assert.equal(flow.styleOf(d, 'predict'), '', '测试类步骤永远不带');
+    d.style = 0; d.styleAll = false;
 });
 
 await check('试玩：从开场白开始，发出去的设定和导入后一样，多轮对话，AI 扮 user，点评能指到页面', async () => {

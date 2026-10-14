@@ -9,7 +9,6 @@
 .cw-statusrow { min-height: 1.4em; }
 .cw-status { font-size: 0.88em; opacity: 0.8; }
 .cw-ptitle { font-size: 1.05em; }
-.cw-hist { width: 100%; margin: 0; }
 
 /* 目录 */
 .cw-next { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--SmartThemeQuoteColor) 10%, transparent); }
@@ -145,3 +144,25 @@
 .cw-msghead { margin: 0; }
 .cw-msghead .cw-btn { font-size: 0.82em; padding: 2px 8px; }
 .cw-msgtext { white-space: normal; word-break: break-word; }
+
+/* 改了什么 */
+.cw-changes > summary { color: var(--SmartThemeQuoteColor); }
+.cw-hunk { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; border-bottom: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor) 40%, transparent); font-size: 0.9em; }
+.cw-hunk:last-of-type { border-bottom: 0; }
+.cw-del { background: rgba(210, 70, 70, 0.14); text-decoration: line-through; text-decoration-color: rgba(210, 70, 70, 0.6); padding: 2px 6px; border-radius: 4px; }
+.cw-add { background: rgba(80, 160, 110, 0.16); padding: 2px 6px; border-radius: 4px; }
+
+/* 局部重写 */
+.cw-selbar { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--SmartThemeQuoteColor); background: color-mix(in srgb, var(--SmartThemeQuoteColor) 8%, transparent); }
+
+/* 草稿 */
+.cw-drafts > summary { font-size: 0.88em; opacity: 0.8; }
+.cw-draftrow { padding: 3px 0; border-bottom: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor) 35%, transparent); }
+.cw-draftrow .cw-btn { font-size: 0.85em; padding: 2px 10px; }
+
+/* 致谢 */
+.cw-credits { margin-top: 6px; padding: 8px 12px; border-radius: 10px; border: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor) 45%, transparent); display: flex; flex-direction: column; gap: 2px; }
+.cw-credits .cw-sub { margin: 0 0 2px; }
+.cw-credits a { color: var(--SmartThemeQuoteColor); }
+.cw-link { cursor: pointer; color: var(--SmartThemeQuoteColor); margin-left: 6px; white-space: nowrap; }
+.cw-credits.cw-credline { display: block; line-height: 1.7; }

@@ -1,9 +1,10 @@
 // 写卡工坊 · 各步骤的执行逻辑（不依赖 DOM，API 调用通过 call 注入，便于测试）
 
-import { DEFAULT_PROMPTS, DEFAULT_RULES, PERSONA_TEMPLATE, SYSTEM_CARD, SYSTEM_PROSE, STEP_INFO, fill, ruleVars } from './prompts.js';
+import { DEFAULT_PROMPTS, DEFAULT_RULES, RULE_META, CARD_MODES, PERSONA_TEMPLATE, SYSTEM_CARD, SYSTEM_PROSE, STEP_INFO, fill, ruleVars } from './prompts.js';
 import { parseJSON, splitBlocks, blockOf, extractTagged, clip, stripWords, wordList, findWords } from './parse.js';
 import { matchTags, sanitizeTags, toggleTag, tagsText, tagValue, libraryText, findTag, rollDice, PLATFORM_STYLE, dimOf } from './tags.js';
-import { conceptText, answersText, overviewsText, routesText, composeIntro, parseTitles, orderedGreetings, DEFAULT_INTRO_STYLE, cardToDraft, existingSummary, emptyDraft, sentContext, contextText } from './assemble.js';
+import { conceptText, answersText, overviewsText, routesText, composeIntro, parseTitles, orderedGreetings, DEFAULT_INTRO_STYLE, cardToDraft, existingSummary, emptyDraft, sentContext, contextText, CREDIT_WORKSHOP, CREDIT_TEMPLATE } from './assemble.js';
+import { diffLines } from './diff.js';
 import { scanCard, predictOverlap, crossCompare, mergeLifeStory, lifeStoryStats } from './checks.js';
 
 const arr = (x) => (Array.isArray(x) ? x : x == null || x === '' ? [] : [x]);
@@ -37,7 +38,46 @@ export function makeFlow(deps) {
     const aborted = () => deps.aborted?.() ?? false;
     const check = () => { if (aborted()) throw new Error('已停止'); };
 
-    const rules = () => ({ ...DEFAULT_RULES, ...(S().rules ?? {}) });
+    /** 卡的类型：作者在标签页选的优先；没选就看标签和主要角色人数 */
+    function modeOf(d) {
+        if (d?.mode && CARD_MODES[d.mode]) return d.mode;
+        const ct = tagValue(d?.tags ?? [], 'cardType');
+        if (ct.includes('世界卡')) return 'world';
+        const cnt = tagValue(d?.tags ?? [], 'count');
+        if (ct.includes('多人卡') || cnt.includes('NP') || cnt.includes('群像') || (d?.personas?.length ?? 0) > 1) return 'multi';
+        return 'single';
+    }
+
+    /** 规则库里的每个模块：内置的 + 自己加的，带开关、用在哪种卡、额外插到哪些步骤 */
+    function ruleList() {
+        const s = S();
+        const custom = s.customRules ?? {};
+        const names = [...new Set([...Object.keys(DEFAULT_RULES), ...Object.keys(custom)])];
+        return names.map((name) => {
+            const builtin = name in DEFAULT_RULES;
+            const text = builtin ? (str(s.rules?.[name]) ? s.rules[name] : DEFAULT_RULES[name]) : String(custom[name] ?? '');
+            return {
+                name, text, builtin,
+                edited: builtin && !!str(s.rules?.[name]),
+                on: !s.ruleOff?.[name],
+                mode: s.ruleModes?.[name] ?? RULE_META[name]?.mode ?? 'all',
+                steps: s.ruleSteps?.[name] ?? RULE_META[name]?.steps ?? [],
+            };
+        });
+    }
+    const ruleActive = (r, d) => r.on && (r.mode === 'all' || (d && r.mode === modeOf(d)));
+    /** 提示词里 {{rules.名称}} 用的值：关掉的、卡类型不符的是空 */
+    /** 插到这一步的规则模块（提示词里已经写了 {{rules.名称}} 的不重复加） */
+    function ruleExtras(d, id) {
+        const tpl = promptOf(id) ?? '';
+        let out = '';
+        for (const r of ruleList()) {
+            if (!ruleActive(r, d) || !r.steps.includes(id) || !str(r.text) || tpl.includes(`{{rules.${r.name}}}`)) continue;
+            out += `\n\n【规则·${r.name}】\n${r.text}`;
+        }
+        return out;
+    }
+    const rules = (d) => Object.fromEntries(ruleList().map((r) => [r.name, ruleActive(r, d) ? r.text : '']));
     const promptOf = (id) => (S().prompts?.[id]?.trim() ? S().prompts[id] : DEFAULT_PROMPTS[id]);
     const concept = (d) => d.concepts?.[d.pick] ?? null;
     const platform = (d) => tagValue(d.tags, 'platform').map((p) => `${p}：${PLATFORM_STYLE[p] ?? ''}`).join('；') || '主流网文，读者想一直读下去';
@@ -56,7 +96,8 @@ export function makeFlow(deps) {
             npcs: clip((d.npcs ?? []).map((n) => n.content).join('\n'), 2000) || '（无）',
             routes: routesText(d),
             tone: clip(d.tone, 1500) || '（无）',
-            ...ruleVars(rules()),
+            ...ruleVars(rules(d)),
+            cardMode: CARD_MODES[modeOf(d)],
         };
     }
 
@@ -80,6 +121,7 @@ export function makeFlow(deps) {
         const empty = value == null || (typeof value === 'string' ? !value.trim() : Array.isArray(value) ? !value.length : !Object.values(value).some((v) => (typeof v === 'string' ? v.trim() : Array.isArray(v) ? v.length : v)));
         if (empty) return;
         d.history ??= {};
+        if (d.changes?.[key]) delete d.changes[key]; // 新的一版，旧的“改了什么”作废（改动类操作会在之后重新记）
         const list = (d.history[key] ??= []);
         list.push(structuredClone(value));
         if (list.length > 5) list.shift();
@@ -98,6 +140,7 @@ export function makeFlow(deps) {
             npc: { get: () => d.npcs, set: (v) => { d.npcs = v; } },
             routes: { get: () => d.routes.map((r) => r.info), set: (v) => { d.routes.forEach((r, i) => { r.info = v[i] ?? r.info; }); } },
             tone: { get: () => d.tone, set: (v) => { d.tone = v; } },
+            relations: { get: () => d.relations ?? '', set: (v) => { d.relations = v; } },
             greet: { get: () => d.greetings.filter((g) => g.route === name).map((g) => g.text), set: (v) => { d.greetings = [...d.greetings.filter((g) => g.route !== name), ...v.map((text) => ({ route: name, text }))]; } },
             free: { get: () => fr()?.content ?? '', set: (v) => { const f = fr(); if (f) f.content = v; } },
             intro: { get: () => d.intro, set: (v) => { d.intro = v; } },
@@ -126,6 +169,7 @@ export function makeFlow(deps) {
         if (kind === 'persona') { const p = d.personas.find((x) => x.name === name); return p && { label: labels.persona, get: () => p.text, set: (v) => { p.text = v; } }; }
         if (kind === 'world') return { label: labels.world, get: () => d.world.main, set: (v) => { d.world.main = v; } };
         if (kind === 'tone') return { label: labels.tone, get: () => d.tone, set: (v) => { d.tone = v; } };
+        if (kind === 'relations') return { label: '角色关系', get: () => d.relations ?? '', set: (v) => { d.relations = v; } };
         const slot = slotOf(d, key);
         return slot && labels[kind] && { label: labels[kind], ...slot };
     }
@@ -138,9 +182,10 @@ export function makeFlow(deps) {
         if (!fb) throw new Error('先在“哪里不满意”里写意见');
         const text = slot.get();
         if (!str(text)) throw new Error('这一块是空的，没法改');
-        const out = await run('revise', d, { label: slot.label, fb, text });
+        const out = await run('revise', d, { label: slot.label, fb, text }, { styleKey: key });
         remember(d, key.startsWith('persona:') ? key : key, key.startsWith('persona:') ? { overview: d.personas.find((x) => x.name === key.slice(8))?.overview ?? '', text } : text);
         slot.set(out.trim());
+        noteChanges(d, key, text, out.trim(), `按意见改：${fb.slice(0, 40)}`);
         d.feedback[key] = '';
         return d;
     }
@@ -305,11 +350,34 @@ export function makeFlow(deps) {
      * @param {{stage?:string, system?:string, json?:boolean, key?:string, prev?:string, close?:string}} opt
      * key：这一块的名字（修改意见、上一版、截断提醒都按它记）；prev：上一版内容，有修改意见时一起发给 AI；close：收尾标签，用来判断有没有被截断
      */
-    async function run(id, d, extra = {}, { stage, system, json = false, key, prev, close } = {}) {
+    // ───── 文风 ─────
+    const PERSONA_STEPS = new Set(['persona', 'backstory', 'destale']);
+    const ALL_STYLE_STEPS = new Set(['world', 'npc', 'npcOne', 'routes', 'free', 'greeting', 'expand', 'custom']);
+    /** 这一步要不要带文风：人设类步骤带；勾了“其他步骤也用”时世界观、NPC、路线、模块、开场白也带 */
+    function styleOf(d, id, key = '') {
+        const st = (S().styles ?? [])[Number(d.style) - 1];
+        if (!str(st?.text)) return '';
+        const personaish = PERSONA_STEPS.has(id) || String(key).startsWith('persona:');
+        if (personaish || (d.styleAll && (ALL_STYLE_STEPS.has(id) || ['revise', 'localEdit'].includes(id)))) return st.text;
+        return '';
+    }
+
+    /** 记下这次改了哪里（给“改了什么”看） */
+    function noteChanges(d, key, before, after, how = '') {
+        const hunks = diffLines(before, after);
+        d.changes ??= {};
+        d.changes[key] = { at: Date.now(), how, hunks: hunks.slice(0, 40), more: Math.max(0, hunks.length - 40) };
+        return hunks.length;
+    }
+
+    async function run(id, d, extra = {}, { stage, system, json = false, key, prev, close, styleKey } = {}) {
         check();
         const info = STEP_INFO[id] ?? { name: id, stage: 'card', temp: 0.8 };
         progress(`${info.name}…`);
         let user = fill(promptOf(id), { ...baseVars(d), ...extra });
+        user += ruleExtras(d, id);
+        const style = styleOf(d, id, styleKey ?? key);
+        if (style) user += `\n\n【文风】作者指定的文风如下。它只管用词和句子怎么写；内容、格式和上面的要求都不变，格式要求冲突时以格式为准。\n${style}`;
         const fb = key ? feedbackOf(d, key) : '';
         if (fb) {
             user += `\n\n【作者对上一版的修改意见，必须优先满足】\n${fb}`;
@@ -459,30 +527,50 @@ export function makeFlow(deps) {
         return d;
     }
 
-    async function persona(d, name) {
-        const p = d.personas.find((x) => x.name === name);
-        if (!p) throw new Error(`没有角色 ${name}`);
-        const others = d.personas.filter((x) => x.name !== name);
+    /** 写人设。可以传名字或序号；名字空着时让 AI 起名（新加的角色） */
+    async function persona(d, nameOrIndex) {
+        const p = typeof nameOrIndex === 'number' ? d.personas[nameOrIndex] : d.personas.find((x) => x.name === nameOrIndex);
+        if (!p) throw new Error(`没有角色 ${nameOrIndex}`);
+        const NEW = '〔新角色〕';
+        const unnamed = !str(p.name);
+        const name = unnamed ? NEW : str(p.name);
+        const others = d.personas.filter((x) => x !== p && str(x.name));
         const lineup = concept(d)?.lineup ?? [];
         const otherText = others.length
             ? `【同卡的其他主要角色】\n${others.map((o) => `${o.name}：${o.overview || lineup.find((l) => l.name === o.name)?.identity || ''}`).join('\n')}`
             : '';
-        const np = others.length || tagValue(d.tags, 'count').some((c) => c === 'NP' || c === '群像');
+        const np = others.length || modeOf(d) === 'multi';
         const npRule = np ? `- 这张卡有多个主要角色。${name} 要占一个和其他人不同的张力位置（权力压制、旧情未了、立场敌对……），他对〔user〕的态度、他想要的东西、他的矛盾轴都不能和其他人重复。` : '';
         const answers = (d.qa?.chars ?? []).filter((c) => c.name === name).flatMap((c) => c.questions)
             .filter((q) => q.answer?.trim()).map((q) => `${q.q}\n→ ${q.answer.trim()}`).join('\n');
+        const ident = (concept(d)?.lineup ?? []).find((l) => l.name === name)?.identity;
+        const brief = [
+            str(p.desc) ? `【作者对这个角色的设想】（必须落实）\n${str(p.desc)}` : '',
+            ident ? `【构想里的身份】${ident}` : '',
+            unnamed ? `【名字】还没起。你来起一个不俗套、合这张卡的名字，在最前面单独输出一块：\n<<<名字>>>\n名字\n后面所有写着“${NEW}”的地方都换成这个名字。` : '',
+            !ident && !str(p.desc) && !p.text && (d.existing || others.length) ? '【这是新加进来的角色】根据这张卡已有的内容，补一个卡里缺的、能和已有角色形成张力的人。' : '',
+        ].filter(Boolean).join('\n');
         const raw = await run('persona', d, {
             name,
+            brief,
             others: otherText,
             npRule,
             answers: answers || answersText(d),
-            template: fill(PERSONA_TEMPLATE, { name }),
-        }, { key: `persona:${name}`, prev: p.text, close: `</${name}>` });
-        remember(d, `persona:${name}`, { overview: p.overview, text: p.text });
+            template: fill(rules(d)['人设模板'] || PERSONA_TEMPLATE, { name }),
+        }, { key: `persona:${name}`, prev: p.text, close: unnamed ? undefined : `</${name}>` });
         const parsed = splitBlocks(raw);
+        let real = name;
+        if (unnamed) {
+            real = str(blockOf(parsed, '名字')).split('\n')[0].replace(/[<>《》「」"“”]/g, '').trim() || '新角色';
+            for (let k = 2; d.personas.some((x) => x !== p && x.name === real); k++) real = `${real}${k}`;
+        }
+        remember(d, `persona:${real}`, { overview: p.overview, text: p.text });
         const body = blockOf(parsed, '人设') || parsed.lead || raw;
-        p.overview = blockOf(parsed, '概要') || p.overview;
-        p.text = extractTagged(body, name);
+        const fix = (t) => String(t ?? '').split(NEW).join(real);
+        p.name = real;
+        p.overview = fix(blockOf(parsed, '概要')) || p.overview;
+        p.text = extractTagged(fix(body), real);
+        if (!p.keys?.length) p.keys = [];
         return d;
     }
 
@@ -497,7 +585,9 @@ export function makeFlow(deps) {
         const block = raw.slice(Math.max(0, raw.search(/life_story\s*:/)));
         if (!/life_story\s*:/.test(block)) throw new Error('AI 没按格式写经历，再试一次');
         remember(d, key, { overview: p.overview, text: p.text });
+        const before = p.text;
         p.text = mergeLifeStory(p.text, block);
+        noteChanges(d, key, before, p.text, '展开经历');
         return lifeStoryStats(p.text);
     }
 
@@ -509,7 +599,7 @@ export function makeFlow(deps) {
         const raw = await run('world', d, {
             complexity,
             fandom,
-            zeroRule: pistol ? '- 手枪卡：不用零度写作，简洁写清场景即可。' : rules()['零度写作'],
+            zeroRule: pistol ? '- 手枪卡：不用零度写作，简洁写清场景即可。' : rules(d)['零度写作'],
         }, { key: 'world', prev: d.world?.main, close: '</世界观>' });
         remember(d, 'world', d.world);
         const parsed = splitBlocks(raw);
@@ -523,7 +613,8 @@ export function makeFlow(deps) {
 
     // ───── 4. NPC ─────
     async function npc(d) {
-        const count = concept(d)?.npcs ?? 2;
+        let count = concept(d)?.npcs ?? 2;
+        if (modeOf(d) === 'world') count = Math.max(Number(count) || 0, 6); // 世界卡：人物都在 NPC 库里
         const raw = await run('npc', d, { count: count || 2 }, { key: 'npc', prev: (d.npcs ?? []).map((n) => n.content).join('\n') });
         remember(d, 'npc', d.npcs);
         const parsed = splitBlocks(raw);
@@ -533,7 +624,57 @@ export function makeFlow(deps) {
         return d;
     }
 
+    /** 多人卡：主要角色之间的关系网、修罗场、出场规则（常驻在人设后面） */
+    async function relations(d) {
+        if ((d.personas ?? []).filter((p) => str(p.name)).length < 2) throw new Error('至少要有两个主要角色');
+        const raw = await run('relations', d, {}, { key: 'relations', prev: d.relations, close: '</角色关系>' });
+        remember(d, 'relations', d.relations ?? '');
+        const before = d.relations ?? '';
+        d.relations = raw.trim();
+        if (str(before)) noteChanges(d, 'relations', before, d.relations, '重写角色关系');
+        return d;
+    }
+
+    /** 只写（或重写）第 i 个 NPC；名字、作者的设想可以先填，空着让 AI 想 */
+    async function npcOne(d, i) {
+        const n = d.npcs[i];
+        if (!n) throw new Error('没有这个 NPC');
+        const others = d.npcs.filter((x, k) => k !== i && str(x.content));
+        const raw = await run('npcOne', d, {
+            name: str(n.name) || '（你来起）',
+            desc: str(n.desc) || '（没写，你来想一个这张卡缺的）',
+            otherNpcs: others.map((x) => `${x.name}：${clip(x.content, 200)}`).join('\n') || '（还没有）',
+        }, { styleKey: 'npc' });
+        const parsed = splitBlocks(raw);
+        const b = parsed.blocks.find((x) => x.body) ?? (parsed.lead ? { name: '', keys: [], body: parsed.lead } : null);
+        if (!b) throw new Error('AI 没按格式写，再试一次');
+        remember(d, 'npc', d.npcs);
+        const before = n.content ?? '';
+        if (!str(n.name) && b.name) n.name = b.name;
+        n.keys = [...new Set([...(n.keys ?? []), ...(b.keys ?? [])].map((k) => str(k)).filter((k) => k && k !== n.name))];
+        n.content = b.body;
+        if (str(before)) noteChanges(d, 'npc', before, n.content, `重写 ${n.name}`);
+        return n;
+    }
+
     // ───── 5. 路线 ─────
+    /** 玩家信息和关系指导按每个主要角色的名字分开写（多人卡每个人都要写到） */
+    function routeFieldVars(d) {
+        const names = (d.personas ?? []).map((p) => str(p.name)).filter(Boolean);
+        if (!names.length) {
+            return {
+                charNames: '这个世界里的关键人物',
+                relationFields: '〔user〕在这个世界的处境：\n〔user〕和关键人物的关系：（写名字）',
+                guideFields: '关键人物各自对〔user〕的态度：（写名字）',
+            };
+        }
+        return {
+            charNames: names.join('、'),
+            relationFields: names.map((n) => `〔user〕和${n}的关系：\n〔user〕和${n}的过去：`).join('\n'),
+            guideFields: names.map((n) => `${n}：`).join('\n'),
+        };
+    }
+
     async function routes(d) {
         if (!d.routes?.length) d.routes = [{ name: '主线', user: '', period: '', info: '' }];
         // 有空着的路线就只写空着的（给已有的卡加路线时不动原来的），全写好了就全部重写
@@ -543,6 +684,7 @@ export function makeFlow(deps) {
         const raw = await run('routes', d, {
             routes: targets.map((r, i) => `${i + 1}. ${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}`).join('\n'),
             otherRoutes: others.length ? `【已有的路线】（不用重写，新路线要和它们区分开）\n${others.map((r) => `${r.name}：${clip(r.info, 300)}`).join('\n')}` : '',
+            ...routeFieldVars(d),
         }, { key: 'routes', prev: targets.map((r) => r.info).join('\n') });
         remember(d, 'routes', d.routes.map((r) => r.info));
         const parsed = splitBlocks(raw);
@@ -664,6 +806,46 @@ export function makeFlow(deps) {
         return texts.length;
     }
 
+    // ───── 局部重写 ─────
+    const getAt = (o, path) => path.split('.').reduce((x, k) => (x == null ? undefined : x[k]), o);
+    const setAt = (o, path, v) => { const ks = path.split('.'); const last = ks.pop(); ks.reduce((x, k) => (x[k] ??= {}), o)[last] = v; };
+
+    /**
+     * 只改选中的一段：把选中的部分用【【 】】标出来，AI 只交回这一段，前后原样拼回去。
+     * @param {{path:string, start:number, end:number, instruction?:string, key?:string, label?:string}} o
+     */
+    async function localEdit(d, { path, start, end, instruction = '', key = '', label = '' }) {
+        const text = String(getAt(d, path) ?? '');
+        if (!(end > start) || end > text.length) throw new Error('先在框里选中要改的那段');
+        const sel = text.slice(start, end);
+        if (!str(sel)) throw new Error('选中的是空白');
+        const W = 2500;
+        const head = text.slice(Math.max(0, start - W), start);
+        const tail = text.slice(end, end + W);
+        const context = `${start > W ? '……' : ''}${head}【【${sel}】】${tail}${end + W < text.length ? '……' : ''}`;
+        const out = await run('localEdit', d, {
+            label: label || path,
+            instruction: str(instruction) || '重写这一段：意思和信息保留，写得更具体、更像这个角色自己，去掉套话和空泛的形容。',
+            context,
+        }, { styleKey: key });
+        let rep = String(out).replace(/【【|】】/g, '').trim();
+        // 保留选中部分原来的缩进、列表符号、YAML 键名和结尾换行（AI 常把它们丢掉）
+        const pre = sel.match(/^\s*(?:[-*]\s+)?(?:[A-Za-z_\u4e00-\u9fa5][\w\u4e00-\u9fa5]{0,20}:\s+)?/)[0];
+        const lead = sel.match(/^\s*/)[0];
+        const trail = sel.match(/\s*$/)[0];
+        rep = (pre.trim() && !rep.startsWith(pre.trim()) ? pre : lead) + rep + trail;
+        if (key) {
+            const slot = slotOf(d, key);
+            if (slot) remember(d, key, structuredClone(slot.get()));
+        }
+        setAt(d, path, text.slice(0, start) + rep + text.slice(end));
+        if (key) {
+            d.changes ??= {};
+            d.changes[key] = { at: Date.now(), how: `局部重写${str(instruction) ? `：${str(instruction).slice(0, 40)}` : ''}`, hunks: [{ before: sel.trim(), after: rep.trim() }], more: 0 };
+        }
+        return { before: sel, after: rep };
+    }
+
     // ───── 试玩 ─────
     const charName = (d) => str(d.existing?.name) || str(d.personas?.[0]?.name) || str(d.name) || '角色';
 
@@ -724,7 +906,7 @@ export function makeFlow(deps) {
         check();
         const c = playContext(d);
         p.sent = [...c.before, ...c.card, ...c.after].map((x) => x.label);
-        const system = playSub(d, fill(promptOf('playChar'), { ...baseVars(d), char: charName(d), card: contextText(c), length: S().playLength || 300 }));
+        const system = playSub(d, fill(promptOf('playChar'), { ...baseVars(d), char: charName(d), card: contextText(c), length: S().playLength || 300 }) + ruleExtras(d, 'playChar'));
         const messages = p.messages.map((m) => ({ role: m.role === 'char' ? 'assistant' : 'user', content: playSub(d, m.text) }));
         progress(`${STEP_INFO.playChar.name}…`);
         const out = await deps.llm({ system, messages, stage: STEP_INFO.playChar.stage, temperature: STEP_INFO.playChar.temp });
@@ -843,10 +1025,14 @@ export function makeFlow(deps) {
         if (!p || !ov.length) return d;
         const overlaps = ov.map((o) => `- 卡里：「${o.card}」\n  刻板写法（${o.from}）：「${o.text}」`).join('\n');
         const raw = await run('destale', d, { name, overlaps, persona: p.text });
+        const before = p.text;
+        remember(d, `persona:${name}`, { overview: p.overview, text: before });
         p.text = extractTagged(raw, name);
+        const n = noteChanges(d, `persona:${name}`, before, p.text, `重写撞车的 ${ov.length} 处`);
+        d.predict[name].fixed = ov.map((o) => ({ card: o.card, text: o.text }));
         d.predict[name].overlaps = [];
         d.predict[name].rewritten = true;
-        return d;
+        return n;
     }
 
     /** 本地扫描整张卡 */
@@ -891,6 +1077,7 @@ export function makeFlow(deps) {
             slot(`人设概要·${p.name}`, '人设', 'persona', () => p.overview, (v) => { p.overview = v; });
             slot(`人设·${p.name}`, '人设', 'persona', () => p.text, (v) => { p.text = v; });
         });
+        slot('角色关系', '世界书条目', 'persona', () => d.relations, (v) => { d.relations = v; });
         d.npcs.forEach((n) => slot(`NPC·${n.name}`, '世界书条目', 'npc', () => n.content, (v) => { n.content = v; }));
         d.routes.forEach((r) => slot(`路线·${r.name}`, '世界书条目', 'routes', () => r.info, (v) => { r.info = v; }));
         d.free.forEach((f) => slot(`模块·${f.name}`, '世界书条目', f.fromStep ? `step:${f.fromStep}` : 'tone', () => f.content, (v) => { f.content = v; }));
@@ -948,6 +1135,13 @@ export function makeFlow(deps) {
         return i > 0 ? s.introStyles?.[i - 1]?.tpl : DEFAULT_INTRO_STYLE;
     };
 
+    /** 简介致谢：写卡工坊一定有；人设模板没改过（也没关掉）才写灰鸠老师；再加作者自己写的 */
+    function introCredits(s = S()) {
+        const tpl = ruleList().find((r) => r.name === '人设模板');
+        const extra = String(s.introThanks ?? '').split('\n').map((x) => x.trim()).filter(Boolean);
+        return [CREDIT_WORKSHOP, ...(tpl && tpl.on && !tpl.edited ? [CREDIT_TEMPLATE] : []), ...extra];
+    }
+
     function composeIntroFor(d, s = S()) {
         const it = d.intro ?? {};
         return composeIntro(it.parts ?? {}, {
@@ -958,11 +1152,12 @@ export function makeFlow(deps) {
             presetNote: s.presetNote || s.presetGreeting || '',
             notes: s.introNotes,
             charName: d.personas?.[0]?.name ?? '',
+            credits: introCredits(s),
         }, introStyle(s));
     }
 
     return {
-        banned, strip, restore, remember, slotOf,
+        banned, strip, restore, remember, slotOf, localEdit, npcOne, relations, modeOf, ruleList, introCredits, noteChanges, styleOf,
         playGreetings, playStart, playChar, playUser, playAuto, playRedo, playReview, reviewTarget, playContext, charName, PLAY_STYLES,
         inspire, ideaFromInspire, ideaQA, hooks, expand, revise, textSlot, suggestRoutes, addRouteIdea, loadCard, backstory,
         auStart, auCore, auMap, auCheck, auFix, localTags, idea, pickConcept, qa, persona, world, npc, routes, tone, free, custom,

@@ -40,6 +40,8 @@ export function emptyDraft() {
         npcs: [],
         routes: [],
         tone: '',
+        relations: '',
+        mode: '',
         free: [],
         greetings: [],
         intro: { titles: [], pick: 0, parts: {}, text: '' },
@@ -129,6 +131,7 @@ export function buildEntries(draft, { personaPlace = 'blue', personaBlue, active
             add({ comment: `人设·${p.name}`, content: p.text, constant: personaPlace !== 'green', key: keys, position: POS.after, order: 400 });
         }
     }
+    add({ comment: '角色关系', content: draft.relations, constant: true, position: POS.after, order: 420 });
     for (const n of draft.npcs ?? []) {
         add({ comment: `NPC·${n.name}`, content: n.content, constant: false, key: keysOf([n.name, ...(n.keys ?? [])]), position: POS.after, order: 450 });
     }
@@ -256,9 +259,19 @@ export const DEFAULT_INTRO_STYLE = `{{#标签}}【{{标签}}】{{/标签}}{{标�
 
 ## 使用说明
 
-{{使用说明}}{{/使用说明}}`;
+{{使用说明}}{{/使用说明}}
 
-export const INTRO_VARS = ['标签', '标题', '作者', '授权', '题句', '简介', '关于TA', '路线', '内心想法', '角色名', '使用说明'];
+{{#致谢}}┄┄┄┄ ✿ ┄┄┄┄
+
+## 致谢
+
+{{致谢}}{{/致谢}}`;
+
+/** 简介里的致谢。写卡工坊这条一定写；人设模板没改过时写灰鸠老师那条 */
+export const CREDIT_WORKSHOP = '感谢酒疫老师的写卡工坊';
+export const CREDIT_TEMPLATE = '感谢灰鸠老师的人设模板 <https://discord.com/channels/1134557553011998840/1522409047696085143>';
+
+export const INTRO_VARS = ['标签', '标题', '作者', '授权', '题句', '简介', '关于TA', '路线', '内心想法', '角色名', '使用说明', '致谢'];
 
 const FILTERS = {
     引用: quote,
@@ -290,7 +303,7 @@ export function renderIntro(tpl, vars) {
  * 把 AI 写的各段拼成 Discord 简介
  * parts: {标题, 题句, 简介, 关于TA, 路线, 内心想法}
  */
-export function composeIntro(parts, { title = '', tags = [], author = '', license = {}, presetNote = '', notes = '', charName = '' } = {}, style = DEFAULT_INTRO_STYLE) {
+export function composeIntro(parts, { title = '', tags = [], author = '', license = {}, presetNote = '', notes = '', charName = '', credits = [CREDIT_WORKSHOP] } = {}, style = DEFAULT_INTRO_STYLE) {
     const routes = String(parts['路线'] ?? '').trim();
     const notesText = [presetNote ? `**预设参考**：${presetNote}` : '', notes ? `-# ${notes}` : ''].filter(Boolean).join('\n');
     const vars = {
@@ -305,8 +318,13 @@ export function composeIntro(parts, { title = '', tags = [], author = '', licens
         内心想法: String(parts['内心想法'] ?? '').trim(),
         角色名: charName,
         使用说明: notesText,
+        致谢: (credits ?? []).filter((x) => String(x ?? '').trim()).join('\n'),
     };
-    return renderIntro(style || DEFAULT_INTRO_STYLE, vars);
+    const tpl = style || DEFAULT_INTRO_STYLE;
+    let out = renderIntro(tpl, vars);
+    // 自己的简介风格里没放 {{致谢}} 时，写卡工坊那条也要带上（放在最后，用小字）
+    if (!tpl.includes('{{致谢') && !out.includes(CREDIT_WORKSHOP)) out = `${out.trimEnd()}\n\n-# ${CREDIT_WORKSHOP}`;
+    return out;
 }
 
 export function parseTitles(text) {
@@ -323,6 +341,7 @@ const COMMENT_KINDS = [
     [/^世界观·(.+)$/, 'worldExtra'],
     [/^人设概要$/, 'overview'],
     [/^人设·(.+)$/, 'persona'],
+    [/^角色关系$/, 'relations'],
     [/^NPC·(.+)$/, 'npc'],
     [/^路线·(.+)$/, 'route'],
     [/^模块·(.+)$/, 'free'],
@@ -394,6 +413,7 @@ export function cardToDraft(card, worldData, worldName = '') {
         for (const [rx, k] of COMMENT_KINDS) { m = comment.match(rx); if (m) { kind = k; break; } }
         const keys = (e.key ?? []).filter((k) => k !== m?.[1]);
         if (kind === 'tone') d.tone = content;
+        else if (kind === 'relations') d.relations = content;
         else if (kind === 'world') d.world.main = content;
         else if (kind === 'worldExtra') d.world.extra.push({ name: m[1], keys, content });
         else if (kind === 'overview') {

@@ -91,6 +91,10 @@ function respond(messages) {
     assert.ok(!all.includes('<user>'), '发出去的提示词里不能有 <user>（会被酒馆换成名字）');
     const u = messages.at(-1).content;
     if (String(messages[0]?.content).includes('你来扮演卡里的角色')) return `迟春看着〔user〕，没说话。（第 ${messages.length} 条）`;
+    if (u.includes('为角色「〔新角色〕」写人设')) return '<<<名字>>>\n守春人\n<<<概要>>>\n〔新角色〕守着春神庙。\n<<<人设>>>\n<〔新角色〕>\n身份: 守庙人\n</〔新角色〕>';
+    if (u.includes('写他们之间的关系网和多人演绎规则')) return '<角色关系>\n关系:\n  迟春 与 守春人: 旧账\n</角色关系>';
+    if (u.includes('为这张卡写一个 NPC。')) return '<<<NPC:秦太医|太医>>>\n<秦太医>\n功能: 提供信息\n</秦太医>';
+    if (u.includes('只改下面原文里用【【 】】括起来的那一段')) return '他嘴硬，什么都不认。';
     if (u.includes('扮演玩家〔user〕，给角色回一条消息')) return '（后退一步）你是谁？';
     if (u.includes('角色卡的试玩记录')) return JSON.stringify({ score: 6, good: ['克制'], issues: [{ where: '第 3 条', problem: '只会接话', part: 'persona', name: '迟春', fix: '给他一件自己想做的事' }] });
     if (u.includes('方向不同的角色卡构想')) {
@@ -173,7 +177,7 @@ await check('扩展加载：魔棒菜单和设置面板都有，提示词编辑�
 await check('打开是目录：每一步一个入口，提示“下一步”', async () => {
     $('#cw_menu_button').trigger('click');
     await until(() => cw().length);
-    assert.equal(cw().find('.cw-tile').length, 14, '12 步 + 设置 + 提示词');
+    assert.equal(cw().find('.cw-tile').length, 15, '12 步 + 设置 + 关于 + 提示词');
     assert.ok(cw().find('.cw-next').text().includes('一句话构想'));
     assert.equal(cw().find('textarea[data-bind="idea"]').length, 0, '目录页不堆内容');
 });
@@ -446,11 +450,27 @@ await check('简介风格：存一个自己的，切换时只重排不调 API；
     const part = cw().find('textarea[data-bind="intro.parts.简介"]').get(0);
     part.value = '改过的简介'; part.dispatchEvent(new window.Event('input', { bubbles: true }));
     await click('[data-act="recompose"]');
-    assert.ok(draft().intro.text.endsWith('改过的简介'));
+    assert.ok(draft().intro.text.includes('改过的简介'));
+    assert.ok(draft().intro.text.trimEnd().endsWith('-# 感谢酒疫老师的写卡工坊'), '自己的风格没放致谢，写卡工坊那条也补在最后');
     sel.value = '0';
     const sel2 = cw().find('.cw-introstyle').get(0); sel2.value = '0'; sel2.dispatchEvent(new window.Event('change', { bubbles: true }));
     await tick();
     assert.ok(draft().intro.text.includes('## 关于TA'));
+    assert.ok(draft().intro.text.includes('## 致谢') && draft().intro.text.includes('感谢酒疫老师的写卡工坊') && draft().intro.text.includes('感谢灰鸠老师的人设模板'), '默认风格有致谢');
+    // 改了人设模板，灰鸠老师那条自动去掉
+    s.rules['人设模板'] = '我的模板:\n  {{name}}: x';
+    await click('[data-act="recompose"]');
+    assert.ok(!draft().intro.text.includes('灰鸠') && draft().intro.text.includes('感谢酒疫老师的写卡工坊'));
+    s.rules['人设模板'] = '';
+    await go('home');
+    assert.ok(cw().find('.cw-credits').text().includes('本写卡工坊默认提示词来自灰鸠老师，请关注灰鸠老师喵'));
+    assert.equal(cw().find('.cw-credits a, .cw-credits [data-act]').length, 0, '目录里的小字不能点');
+    await click('.cw-tile[data-page="about"]');
+    assert.ok(cw().find('a[href*="discord.com"]').length, '关于页有链接');
+    assert.ok(title().includes('关于'));
+    const about = cw().text();
+    for (const w of ['酒疫', '灰鸠', '使用授权', '插件会动哪些东西', '八股清理']) assert.ok(about.includes(w), w);
+    await go('home');
 });
 
 await check('开场白一写完就改掉必改词；八股检查显示文中真正的词', async () => {
@@ -471,6 +491,111 @@ await check('开场白一写完就改掉必改词；八股检查显示文中真�
         assert.ok(cw().find('.cw-status').text().includes('顺手改掉了'));
         assert.equal(prompts.length - n, 2, '写开场白 1 次 + 改必改词 1 次');
     }
+});
+
+await check('局部重写：选中一段 → 框下出现按钮 → 只改这段，上面显示改了什么；文风可以新建、选上', async () => {
+    await go('prompts');
+    await click('[data-act="ptab"][data-tab="style"]');
+    await click('[data-act="addStyle"]');
+    type('.cw-sttext', '短句，少形容词');
+    assert.equal(ctx.extensionSettings.cardWorkshop.styles[0].text, '短句，少形容词');
+    await go('persona');
+    const sel = cw().find('.cw-stylesel');
+    sel.val('1').trigger('change');
+    await tick();
+    assert.equal(draft().style, 1);
+    const p = draft().personas[0];
+    p.text = '<迟春>\n性格:\n  - 他很温柔\n  - 每年春天去旧桥\n</迟春>';
+    await go('persona');
+    const ta = cw().find('textarea[data-bind="personas.0.text"]').get(0);
+    const a = ta.value.indexOf('他很温柔');
+    ta.setSelectionRange(a, a + 4);
+    ta.dispatchEvent(new window.Event('select', { bubbles: true }));
+    await tick(); await tick();
+    assert.equal(cw().find('.cw-selbar').length, 1, '选中后出现局部重写');
+    assert.ok(cw().find('.cw-selcount').text().includes('4 字'));
+    const inp = cw().find('.cw-selin').get(0);
+    inp.value = '改成嘴硬';
+    inp.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await click('[data-act="localEdit"]');
+    assert.ok(draft().personas[0].text.includes('  - 他嘴硬，什么都不认。\n  - 每年春天去旧桥'), draft().personas[0].text);
+    const last = prompts.at(-1);
+    assert.ok(last.includes('【【他很温柔】】') && last.includes('改成嘴硬') && last.includes('短句，少形容词'));
+    assert.ok(cw().find('.cw-changes').text().includes('他很温柔'), '显示原来的');
+    assert.ok(cw().find('.cw-add').text().includes('他嘴硬'));
+    await click('[data-act="restore"][data-key="persona:迟春"]');
+    assert.ok(draft().personas[0].text.includes('他很温柔'));
+    draft().style = 0;
+});
+
+await check('NPC 页：加一个，写设想，只写这一个', async () => {
+    await go('npc');
+    const n0 = draft().npcs.length;
+    const first = draft().npcs[0]?.content;
+    await click('[data-act="add"][data-path="npcs"]');
+    assert.equal(draft().npcs.length, n0 + 1);
+    type(`input[data-bind="npcs.${n0}.desc"]`, '宫里的老太医');
+    await click(`[data-act="npcOne"][data-i="${n0}"]`);
+    assert.equal(draft().npcs[n0].name, '秦太医');
+    assert.equal(draft().npcs[0].content, first, '别的 NPC 没动');
+    assert.ok(prompts.at(-1).includes('宫里的老太医'));
+    assert.ok(cw().find(`[data-act="npcOne"][data-i="${n0}"]`).text().includes('重写这个'));
+    draft().npcs.splice(n0, 1);
+});
+
+await check('规则库：新建一条、插到世界观、关掉；步骤可以关掉；卡的类型；多人卡写关系网', async () => {
+    const S = ctx.extensionSettings.cardWorkshop;
+    await go('prompts');
+    await click('[data-act="ptab"][data-tab="rule"]');
+    cw().find('.cw-newrule').val('宫斗写法');
+    await click('[data-act="addRule"]');
+    assert.equal(S.customRules['宫斗写法'], '');
+    type('.cw-rule-ta', '每个势力背后都有一位娘娘。');
+    assert.equal(S.customRules['宫斗写法'], '每个势力背后都有一位娘娘。');
+    const box = cw().find('.cw-rulestep[data-step="world"]').get(0);
+    box.checked = true; box.dispatchEvent(new window.Event('change', { bubbles: true })); await tick();
+    assert.deepEqual(S.ruleSteps['宫斗写法'], ['world']);
+    await go('world');
+    await click('[data-act="world"]');
+    assert.ok(prompts.at(-1).includes('【规则·宫斗写法】'));
+    await go('prompts');
+    await click('[data-act="ptab"][data-tab="rule"]');
+    const onBox = cw().find('.cw-rule-on').get(0);
+    onBox.checked = false; onBox.dispatchEvent(new window.Event('change', { bubbles: true })); await tick();
+    assert.equal(S.ruleOff['宫斗写法'], true);
+    await click('[data-act="delRule"]');
+    assert.ok(!('宫斗写法' in S.customRules));
+    // 关掉“试玩”这一步
+    await click('[data-act="ptab"][data-tab="step"]');
+    const pg = cw().find('.cw-pageon[data-page="play"]').get(0);
+    pg.checked = false; pg.dispatchEvent(new window.Event('change', { bubbles: true })); await tick();
+    await go('home');
+    assert.equal(cw().find('.cw-tile[data-page="play"]').length, 0, '目录里不显示');
+    S.offPages = [];
+    // 卡的类型 + 关系网
+    await go('tags');
+    const ms = cw().find('select[data-bind="mode"]').get(0);
+    ms.value = 'multi'; ms.dispatchEvent(new window.Event('change', { bubbles: true })); await tick();
+    assert.equal(draft().mode, 'multi');
+    draft().personas.push({ name: '守春人', keys: [], overview: '', text: '<守春人>x</守春人>' });
+    await go('persona');
+    await click('[data-act="relations"]');
+    assert.ok(draft().relations.includes('旧账'));
+    draft().personas.pop(); draft().relations = ''; draft().mode = '';
+});
+
+await check('人设页：加一个主要角色，写设想，名字让 AI 起', async () => {
+    await go('persona');
+    const n0 = draft().personas.length;
+    await click('[data-act="add"][data-path="personas"]');
+    assert.equal(draft().personas.length, n0 + 1);
+    type(`input[data-bind="personas.${n0}.desc"]`, '守着春神庙的人，知道迟春的秘密');
+    await click(`[data-act="persona"][data-i="${n0}"]`);
+    assert.equal(draft().personas[n0].name, '守春人');
+    assert.ok(draft().personas[n0].text.startsWith('<守春人>'));
+    assert.ok(prompts.at(-1).includes('知道迟春的秘密'));
+    assert.ok(cw().find('.cw-status').text().includes('守春人 的人设写好了'));
+    draft().personas.splice(n0, 1);
 });
 
 await check('八股清理不碰基调与规则', async () => {
@@ -656,12 +781,21 @@ await check('新建草稿：旧的进历史，能读回来', async () => {
     assert.equal(draft().idea, '');
     const s = ctx.extensionSettings.cardWorkshop;
     assert.deepEqual(s.drafts.slice(0, 3).map((x) => x.name), ['黎曙（AU）', '黎曙', '迟春']);
-    const sel = cw().find('.cw-hist').get(0);
-    sel.value = '2';
-    sel.dispatchEvent(new window.Event('change', { bubbles: true }));
-    await tick();
+    await click('[data-act="openDraft"]', 2);
     assert.equal(draft().name, '迟春');
     assert.deepEqual(s.drafts.map((x) => x.name), ['黎曙（AU）', '黎曙'], '读回来的草稿离开历史；新建的空草稿不进历史');
+});
+
+await check('删除草稿：删一份历史、删当前、清空历史', async () => {
+    const s = ctx.extensionSettings.cardWorkshop;
+    await click('[data-act="delDraft"]', 0);
+    assert.deepEqual(s.drafts.map((x) => x.name), ['黎曙']);
+    await click('[data-act="delCurrent"]');
+    assert.equal(draft().name, '', '当前草稿换成空的');
+    assert.deepEqual(s.drafts.map((x) => x.name), ['黎曙'], '删当前不进历史');
+    await click('[data-act="clearDrafts"]');
+    assert.equal(s.drafts.length, 0);
+    assert.ok(cw().text().includes('没有历史草稿'));
 });
 
 fs.rmSync(tp, { recursive: true, force: true });
