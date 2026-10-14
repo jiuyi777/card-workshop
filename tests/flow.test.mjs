@@ -369,6 +369,85 @@ await check('新加一个主要角色：写设想、名字空着让 AI 起；参
     assert.ok(sent.at(-1).user.includes('这是新加进来的角色'));
 });
 
+await check('填了一半再一键补全：构想以写好的内容为准，写好的角色和路线不会丢', async () => {
+    const e = { ...emptyDraft(), idea: '勇者和魔王', personas: [{ name: '魔王', keys: [], overview: '', text: '<魔王>\n想退休，但手下不让\n</魔王>' }], routes: [{ name: '退休后', user: '', period: '', info: '<玩家信息>你是他的继任者</玩家信息>' }] };
+    replies.push(JSON.stringify({ tags: {}, concepts: [{ title: '魔王想退休', lineup: [{ name: '勇者', identity: '来讨伐的', archetype: [] }], routes: [{ name: '讨伐', user: '勇者', period: '现在' }], npcs: 1 }] }));
+    await flow.idea(e);
+    const u = sent.at(-1).user;
+    assert.ok(u.includes('【作者已经写好的内容】') && u.includes('想退休，但手下不让') && u.includes('你是他的继任者'), '构想时带上写好的内容');
+    flow.pickConcept(e, 0);
+    assert.deepEqual(e.personas.map((p) => p.name), ['勇者', '魔王'], '写好的角色留着');
+    assert.ok(e.personas[1].text.includes('想退休'));
+    assert.deepEqual(e.routes.map((r) => r.name), ['讨伐', '退休后'], '写好的路线留着');
+    const { overviewsText } = await import('../src/assemble.js');
+    assert.ok(overviewsText(e).includes('魔王：') && overviewsText(e).includes('想退休'), '没写概要时用人设开头代替');
+});
+
+await check('路线：可以写主题，只写这一条，别的不动', async () => {
+    const e = { ...emptyDraft(), personas: [{ name: '甲', keys: [], overview: '甲', text: 'x' }], routes: [{ name: 'A', user: '旧识', period: '十年后', desc: '', info: '<玩家信息>A 原来的</玩家信息>' }, { name: 'B', user: '仇人', period: '现在', desc: '他失忆了，你是他唯一记得的人', info: '' }] };
+    replies.push('<<<路线:B>>>\n<玩家信息>B 的</玩家信息>');
+    await flow.routes(e, 1);
+    const u = sent.at(-1).user;
+    assert.ok(u.includes('他失忆了，你是他唯一记得的人') && u.includes('必须按这个写'));
+    assert.ok(u.includes('A 原来的') && u.includes('不用重写'), '别的路线当参考');
+    assert.equal(e.routes[0].info, '<玩家信息>A 原来的</玩家信息>');
+    assert.equal(e.routes[1].info, '<玩家信息>B 的</玩家信息>');
+    replies.push('<<<路线:A>>>\n<玩家信息>A 新的</玩家信息>');
+    await flow.routes(e, 0);
+    assert.ok(sent.at(-1).user.includes('上一版') && e.routes[0].info.includes('A 新的') && e.routes[1].info.includes('B 的'));
+});
+
+await check('写回前三方比较：只有写卡工坊改的默认写；酒馆里改过的保留；两边都改的默认保留酒馆的', async () => {
+    const { snapshotOf, mineOf, buildPlan, applyPlan, nextBase } = await import('../src/sync.js');
+    const card = { description: '原描述', personality: '', scenario: '', mes_example: '', first_mes: '开场1', alternate_greetings: ['开场2', '开场3'] };
+    const world = { entries: { 0: { uid: 0, comment: '扒手团', key: [], content: '老鬼', constant: false }, 1: { uid: 1, comment: '世界观', key: [], content: '旧世界', constant: true, order: 2, position: 1 } } };
+    const base = snapshotOf(card, world);
+    const d = { ...emptyDraft(), existing: { avatar: 'a.png', name: 'x', fields: { description: '原描述', personality: '', scenario: '', mes_example: '' }, entries: [{ uid: 0, comment: '扒手团', key: [], content: '老鬼改' }], greetings: ['开场1', '开场2 我改的', '开场3'], base }, world: { main: '旧世界', extra: [] }, greetings: [{ route: '主线', text: '新开场' }] };
+    // 酒馆里：改了开场1、开场2，加了一个开场4
+    const theirsCard = { ...card, first_mes: '开场1 酒馆改', alternate_greetings: ['开场2 酒馆改', '开场3', '开场4 酒馆加的'] };
+    const mine = mineOf(d);
+    const items = buildPlan(mine, base, snapshotOf(theirsCard, world));
+    const by = Object.fromEntries(items.map((x) => [x.id, x]));
+    assert.equal(by['g:0'].status, 'theirs'); assert.equal(by['g:0'].checked, false);
+    assert.equal(by['g:1'].status, 'conflict'); assert.equal(by['g:1'].checked, false);
+    assert.ok(!by['g:2'], '一样的不列');
+    assert.equal(by['n:0'].status, 'new'); assert.equal(by['n:0'].checked, true);
+    assert.equal(by['e:uid:0'].status, 'mine'); assert.equal(by['e:uid:0'].checked, true);
+    assert.ok(!by['f:description'] && !by['e:c:世界观'], '没改的不列');
+    const out = applyPlan(items, { theirsCard, theirsWorld: world, clean: d, mine });
+    assert.deepEqual(out.finalGreetings, ['开场1 酒馆改', '开场2 酒馆改', '开场3', '开场4 酒馆加的', '新开场'], '酒馆的保留，新开场白接在最后');
+    assert.equal(out.world.entries[0].content, '老鬼改');
+    assert.equal(out.cardData.description, undefined, '没勾的字段不写');
+    // 勾上冲突那条就用写卡工坊的
+    by['g:1'].checked = true;
+    assert.equal(applyPlan(items, { theirsCard, theirsWorld: world, clean: d, mine }).finalGreetings[1], '开场2 我改的');
+    // 写卡工坊改了但这次没勾：base 不变，下次还会提示
+    by['e:uid:0'].checked = false;
+    const nb = nextBase(items, base, snapshotOf(theirsCard, world));
+    assert.equal(nb.entries['uid:0'], '老鬼');
+    // 没有上次记录（老草稿）：不一样的都算“不确定”，默认不写
+    const u = buildPlan(mine, undefined, snapshotOf(theirsCard, world));
+    assert.ok(u.filter((x) => x.kind !== 'newGreet').every((x) => x.status === 'unknown' && !x.checked));
+});
+
+await check('开场白不分路线：没有路线也能想梗、扩写、直接写，不会自动加路线', async () => {
+    const e = { ...emptyDraft(), personas: [{ name: '甲', keys: [], overview: '甲', text: 'x' }] };
+    replies.push(JSON.stringify({ hooks: ['雨夜桥下', '庙门口'] }));
+    await flow.hooks(e, -1);
+    assert.ok(sent.at(-1).user.includes('不分路线'));
+    assert.equal(e.hooks[''].length, 2);
+    e.hooks[''][0].on = true;
+    replies.push('<<<开场白>>>\n雨夜。');
+    await flow.expand(e, -1);
+    replies.push('<<<开场白>>>\n直接写的。');
+    await flow.greetings(e, -1, 1);
+    assert.equal(e.routes.length, 0, '没加路线');
+    assert.deepEqual(e.greetings.map((g) => g.route), ['']);
+    assert.equal(e.greetings[0].text, '直接写的。', '直接写替换不分路线的开场白');
+    const { buildCharacter } = await import('../src/assemble.js');
+    assert.equal(buildCharacter(e).first_mes, '直接写的。');
+});
+
 await check('卡的类型：标签和人数自动判断，作者选的优先', () => {
     const m = (tags, extra = {}) => flow.modeOf({ ...emptyDraft(), tags, ...extra });
     assert.equal(m([]), 'single');

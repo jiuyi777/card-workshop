@@ -81,7 +81,9 @@ export function answersText(draft) {
 }
 
 export function overviewsText(draft) {
-    return (draft?.personas ?? []).filter((p) => p.overview?.trim()).map((p) => `${p.name}：${p.overview.trim()}`).join('\n') || '（还没有）';
+    // 没写概要（比如作者手写的人设）时用设想或人设开头代替
+    const brief = (p) => p.overview?.trim() || p.desc?.trim() || String(p.text ?? '').replace(/<\/?[^>\n]{1,30}>/g, '').trim().slice(0, 200);
+    return (draft?.personas ?? []).filter((p) => p.name?.trim() && brief(p)).map((p) => `${p.name}：${brief(p)}`).join('\n') || '（还没有）';
 }
 
 export function routesText(draft) {

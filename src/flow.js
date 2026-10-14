@@ -87,7 +87,7 @@ export function makeFlow(deps) {
         return {
             idea: d.idea,
             tags: tagsText(d.tags, L()) || '（未选）',
-            concept: concept(d) ? conceptText(concept(d)) : d.au ? auSummary(d) : (d.existing ? existingSummary(d) : conceptText(null)),
+            concept: concept(d) ? conceptText(concept(d)) : d.au ? auSummary(d) : (d.existing ? existingSummary(d) : ([str(d.idea) && `脑洞：${str(d.idea)}`, writtenText(d)].filter(Boolean).join('\n') || conceptText(null))),
             platform: platform(d),
             overviews: overviewsText(d),
             personas: clip((d.personas ?? []).map((p) => p.text).filter(Boolean).join('\n\n'), 6000),
@@ -442,13 +442,25 @@ export function makeFlow(deps) {
         return hits;
     }
 
+    /** 作者已经写好的内容（填了一半再一键补全时，构想必须以它为准） */
+    function writtenText(d) {
+        const parts = [];
+        const ps = (d.personas ?? []).filter((p) => str(p.text) || str(p.overview) || str(p.desc));
+        if (ps.length) parts.push(`已写好的主要角色（lineup 必须用这些人，名字不改；可以再加人）：\n${ps.map((p) => `- ${p.name || '（还没起名）'}：${clip(str(p.overview) || str(p.desc) || str(p.text), 500)}`).join('\n')}`);
+        if (str(d.world?.main)) parts.push(`已写好的世界观：\n${clip(d.world.main, 800)}`);
+        const rs = (d.routes ?? []).filter((r) => str(r.info));
+        if (rs.length) parts.push(`已写好的路线（routes 必须包含这些，名字不改）：\n${rs.map((r) => `- ${r.name}：${clip(r.info, 300)}`).join('\n')}`);
+        if (str(d.tone)) parts.push(`已写好的基调：\n${clip(d.tone, 400)}`);
+        return parts.length ? `【作者已经写好的内容】（最高优先级。三个构想都必须建立在这些内容上，不能换人、换设定；只补还没写的部分）\n${parts.join('\n')}` : '';
+    }
+
     async function idea(d) {
         const lib = L();
         const hits = localTags(d);
         const j = parseJSON(await run('idea', d, {
             matched: hits.map((h) => h.name).join('、') || '（无）',
             tagLibrary: libraryText(lib),
-            ideaAnswers: ideaAnswers(d),
+            ideaAnswers: [ideaAnswers(d), writtenText(d)].filter(Boolean).join('\n'),
         }, { json: true, key: 'idea', prev: (d.concepts ?? []).map((c) => c.title).join('\n') }));
         remember(d, 'idea', { concepts: d.concepts, pick: d.pick });
         d.concepts = arr(j.concepts).slice(0, 3).map(normalizeConcept);
@@ -490,8 +502,17 @@ export function makeFlow(deps) {
         if (!c) return d;
         d.pick = i;
         const old = new Map((d.personas ?? []).map((p) => [p.name, p]));
-        d.personas = c.lineup.map((p) => old.get(p.name) ?? { name: p.name, keys: [], overview: '', text: '' });
-        d.routes = c.routes.map((r) => ({ ...r, info: (d.routes ?? []).find((x) => x.name === r.name)?.info ?? '' }));
+        const mine = (p) => str(p.text) || str(p.desc) || p.added;
+        // 作者自己写过的角色和路线不丢：构想里没有的也留着
+        d.personas = [
+            ...c.lineup.map((p) => old.get(p.name) ?? { name: p.name, keys: [], overview: '', text: '' }),
+            ...(d.personas ?? []).filter((p) => mine(p) && !c.lineup.some((l) => l.name === p.name)),
+        ];
+        const oldRoutes = d.routes ?? [];
+        d.routes = [
+            ...c.routes.map((r) => ({ ...r, info: oldRoutes.find((x) => x.name === r.name)?.info ?? '' })),
+            ...oldRoutes.filter((r) => str(r.info) && !c.routes.some((x) => x.name === r.name)),
+        ];
         if (!d.name || d.nameAuto) {
             d.name = c.lineup.length === 1 ? c.lineup[0].name : c.title.slice(0, 20);
             d.nameAuto = true;
@@ -675,14 +696,16 @@ export function makeFlow(deps) {
         };
     }
 
-    async function routes(d) {
+    /** 写路线信息。only = 只写第几条（单独写 / 重写一条）；不传就写空着的，全写好了就全部重写 */
+    async function routes(d, only) {
         if (!d.routes?.length) d.routes = [{ name: '主线', user: '', period: '', info: '' }];
-        // 有空着的路线就只写空着的（给已有的卡加路线时不动原来的），全写好了就全部重写
         const empty = d.routes.filter((r) => !str(r.info));
-        const targets = empty.length ? empty : d.routes;
+        const targets = Number.isInteger(only) ? [d.routes[only]].filter(Boolean) : (empty.length ? empty : d.routes);
+        if (!targets.length) throw new Error('没有这条路线');
+        const before = targets.map((r) => r.info ?? '');
         const others = d.routes.filter((r) => !targets.includes(r) && str(r.info));
         const raw = await run('routes', d, {
-            routes: targets.map((r, i) => `${i + 1}. ${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}`).join('\n'),
+            routes: targets.map((r, i) => `${i + 1}. ${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}${str(r.desc) ? `\n   作者定的主题（必须按这个写）：${str(r.desc)}` : ''}${Number.isInteger(only) && str(r.info) ? `\n   上一版：${clip(r.info, 600)}` : ''}`).join('\n'),
             otherRoutes: others.length ? `【已有的路线】（不用重写，新路线要和它们区分开）\n${others.map((r) => `${r.name}：${clip(r.info, 300)}`).join('\n')}` : '',
             ...routeFieldVars(d),
         }, { key: 'routes', prev: targets.map((r) => r.info).join('\n') });
@@ -698,6 +721,7 @@ export function makeFlow(deps) {
             used.add(r);
             r.info = b.body;
         }
+        if (Number.isInteger(only) && str(before[0])) noteChanges(d, 'routes', before[0], targets[0].info, `重写路线 ${targets[0].name}`);
         return d;
     }
 
@@ -748,9 +772,9 @@ export function makeFlow(deps) {
 
     // ───── 7. 开场白 ─────
     async function greetings(d, ri, n = S().greetingCount || 2) {
-        const r = d.routes[ri] ?? { name: '主线', info: '' };
+        const r = routeOf(d, ri);
         const raw = await run('greeting', d, {
-            route: r.name,
+            route: r.label ?? r.name,
             n,
             length: S().greetingLength || '600–900',
             routeInfo: r.info || `${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}`,
@@ -766,15 +790,26 @@ export function makeFlow(deps) {
     }
 
     // 先想梗，再扩写
+    /** 第 ri 条路线；ri = -1 或者还没有路线时是“不分路线” */
+    function routeOf(d, ri) {
+        const r = Number(ri) >= 0 ? d.routes[Number(ri)] : null;
+        if (r) return r;
+        const names = (d.routes ?? []).map((x) => x.name).filter(Boolean);
+        return {
+            name: '', label: '不分路线',
+            info: `不分路线：这个开场白不绑定某一条路线。按人设、世界观和基调写，〔user〕的身份可以在开场白里自然交代，也可以沿用卡里已有的设定。${names.length ? `（这张卡的路线有：${names.join('、')}，这个开场白不属于其中任何一条）` : ''}`,
+        };
+    }
+
     const routeVars = (d, r) => ({
-        route: r.name,
+        route: r.label ?? r.name,
         routeInfo: r.info || `${r.name}｜〔user〕身份：${r.user || '未定'}｜时期：${r.period || '未定'}`,
         length: S().greetingLength || '600–900',
         personas: clip((d.personas ?? []).map((p) => p.text).join('\n\n'), 5000),
     });
 
     async function hooks(d, ri, n = 5) {
-        const r = d.routes[ri] ?? { name: '主线', info: '' };
+        const r = routeOf(d, ri);
         d.hooks ??= {};
         const list = (d.hooks[r.name] ??= []);
         const j = parseJSON(await run('hooks', d, {
@@ -789,7 +824,7 @@ export function makeFlow(deps) {
     }
 
     async function expand(d, ri) {
-        const r = d.routes[ri] ?? { name: '主线', info: '' };
+        const r = routeOf(d, ri);
         const picked = (d.hooks?.[r.name] ?? []).filter((h) => h.on && str(h.text));
         if (!picked.length) throw new Error('先勾选要扩写的梗，或者自己写一个');
         const raw = await run('expand', d, {
@@ -1157,7 +1192,7 @@ export function makeFlow(deps) {
     }
 
     return {
-        banned, strip, restore, remember, slotOf, localEdit, npcOne, relations, modeOf, ruleList, introCredits, noteChanges, styleOf,
+        banned, strip, restore, remember, slotOf, localEdit, routeOf, npcOne, relations, modeOf, ruleList, introCredits, noteChanges, styleOf,
         playGreetings, playStart, playChar, playUser, playAuto, playRedo, playReview, reviewTarget, playContext, charName, PLAY_STYLES,
         inspire, ideaFromInspire, ideaQA, hooks, expand, revise, textSlot, suggestRoutes, addRouteIdea, loadCard, backstory,
         auStart, auCore, auMap, auCheck, auFix, localTags, idea, pickConcept, qa, persona, world, npc, routes, tone, free, custom,

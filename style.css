@@ -63,7 +63,7 @@
 .cw-issues { display: flex; flex-wrap: wrap; gap: 4px; }
 .cw-issue { font-size: 0.82em; padding: 1px 6px; border-radius: 4px; word-break: break-all; }
 .cw-issue.error { background: rgba(210, 70, 70, 0.3); }
-.cw-issue.warn { background: rgba(220, 150, 60, 0.28); }
+.cw-issue.warn { background: color-mix(in srgb, var(--SmartThemeBodyColor) 14%, transparent); }
 .cw-issue.info { background: rgba(120, 140, 200, 0.22); }
 .cw-ov { padding: 4px 0; border-bottom: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor) 50%, transparent); }
 .cw-ov:last-child { border-bottom: 0; }
@@ -102,7 +102,7 @@
 /* 修改意见 / 上一版 / 截断 */
 .cw-tools { display: flex; flex-direction: column; gap: 4px; }
 .cw-fb { font-size: 0.92em; }
-.cw-warn { font-size: 0.88em; color: #d08a2c; padding: 4px 8px; border-radius: 6px; background: rgba(220, 150, 60, 0.12); }
+.cw-warn { font-size: 0.88em; font-weight: 600; padding: 4px 8px; border-radius: 6px; border-left: 3px solid var(--SmartThemeBorderColor); background: color-mix(in srgb, var(--SmartThemeBodyColor) 6%, transparent); }
 .cw-presetpick { display: flex; flex-direction: column; gap: 3px; }
 
 /* 开场白的梗 */
@@ -122,13 +122,13 @@
 /* AU 检查 */
 .cw-verdict { display: inline-block; font-size: 0.82em; padding: 0 6px; border-radius: 4px; margin-right: 4px; }
 .cw-verdict.v-保留 { background: rgba(80, 160, 110, 0.3); }
-.cw-verdict.v-偏离 { background: rgba(220, 150, 60, 0.3); }
+.cw-verdict.v-偏离 { background: color-mix(in srgb, var(--SmartThemeBodyColor) 16%, transparent); }
 .cw-verdict.v-丢了 { background: rgba(210, 70, 70, 0.3); }
-.cw-warntext { color: #d08a2c; }
+.cw-warntext { font-weight: 600; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
 
 /* 每页底部的八股检查 */
 .cw-bagubar { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; padding: 8px 10px; border-radius: 8px; border: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor) 50%, transparent); }
-.cw-bagubar.hit { border-color: rgba(220, 150, 60, 0.7); background: rgba(220, 150, 60, 0.06); }
+.cw-bagubar.hit { border-style: solid; border-color: color-mix(in srgb, var(--SmartThemeBorderColor) 70%, transparent); }
 
 /* token */
 .cw-tokline { display: flex; justify-content: flex-end; margin-top: -4px; }
@@ -166,3 +166,8 @@
 .cw-credits a { color: var(--SmartThemeQuoteColor); }
 .cw-link { cursor: pointer; color: var(--SmartThemeQuoteColor); margin-left: 6px; white-space: nowrap; }
 .cw-credits.cw-credline { display: block; line-height: 1.7; }
+
+/* 说明小字 */
+.cw.cw-nohelp .cw-help { display: none; }
+.cw-helpbtn { cursor: pointer; font-size: 0.82em; opacity: 0.55; padding: 2px 8px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 50%, transparent); white-space: nowrap; }
+.cw-helpbtn.on { opacity: 0.9; }

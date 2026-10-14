@@ -79,7 +79,11 @@ globalThis.fetch = async (url, opts) => {
         }
         return { ok: true, text: async () => '' };
     }
-    if (url === '/api/characters/create') return { ok: true, text: async () => '迟春.png' };
+    if (url === '/api/characters/create') {
+        const b = JSON.parse(opts.body);
+        cards['迟春.png'] = { avatar: '迟春.png', name: b.ch_name, data: { name: b.ch_name, description: b.description, personality: b.personality, scenario: b.scenario, mes_example: b.mes_example, first_mes: b.first_mes, alternate_greetings: b.alternate_greetings, extensions: { world: b.world } } };
+        return { ok: true, text: async () => '迟春.png' };
+    }
     return { ok: true, text: async () => '' };
 };
 
@@ -348,6 +352,30 @@ await check('导入酒馆：世界书不重名、条目按桶型排、角色卡�
     assert.equal(draft().imported.world, '迟春 (2)');
 });
 
+await check('导入后再改：只写回勾选的部分，酒馆里改过的开场白不会被改回去', async () => {
+    const d = draft();
+    assert.ok(d.existing?.fromImport, '导入后算“已导入的卡”');
+    assert.ok(!cw().find('.cw-tile[data-page="existing"]').length);
+    const card = cards['迟春.png'].data;
+    // 在酒馆里改了主开场白
+    card.first_mes = '酒馆里改的主开场白';
+    // 在写卡工坊改了世界观和第二个开场白
+    d.world.main = '<世界观>\n改过的世界观\n</世界观>';
+    const second = d.greetings.find((g) => g.slot === 1);
+    if (second) second.text = '写卡工坊改的第二个开场白';
+    await go('import');
+    assert.ok(cw().text().includes('更新已导入的卡'));
+    await click('[data-act="planWriteBack"]');
+    assert.ok(!cw().find('.cw-planchk[data-id="g:0"]').prop('checked'), '酒馆里改的默认不勾');
+    assert.ok(cw().find('.cw-planchk[data-id="e:c:世界观"]').prop('checked'));
+    await click('[data-act="applyWriteBack"]');
+    assert.equal(cards['迟春.png'].data.first_mes, '酒馆里改的主开场白');
+    if (second) assert.equal(cards['迟春.png'].data.alternate_greetings[0], '写卡工坊改的第二个开场白');
+    const book = worlds[cards['迟春.png'].data.extensions.world];
+    assert.ok(Object.values(book.entries).find((e) => e.comment === '世界观').content.includes('改过的世界观'));
+    assert.equal(d.greetings.find((g) => g.slot === 0).text, '酒馆里改的主开场白', '酒馆的版本同步回写卡工坊');
+});
+
 await check('切换路线：只开选中的那条', async () => {
     cw().find('.cw-route').val('1');
     await click('[data-act="switchRoute"]');
@@ -368,7 +396,7 @@ await check('简介：生成、换标题、写进角色卡', async () => {
     text = draft().intro.text;
     assert.ok(text.split('\n')[0].endsWith('】春天结束之前'));
     await click('[data-act="saveIntro"]');
-    const merge = requests.find((r) => r.url === '/api/characters/merge-attributes').body;
+    const merge = requests.findLast((r) => r.url === '/api/characters/merge-attributes').body;
     assert.equal(merge.avatar, '迟春.png');
     assert.equal(merge.data.creator_notes, text);
 });
@@ -598,6 +626,40 @@ await check('人设页：加一个主要角色，写设想，名字让 AI 起', 
     draft().personas.splice(n0, 1);
 });
 
+await check('说明小字：第一次进某页显示，再进就收起；“说明”按钮能临时打开；设置里可以一直显示', async () => {
+    const S = ctx.extensionSettings.cardWorkshop;
+    S.helpMode = 'first'; S.seenHelp = [];
+    await go('npc');
+    assert.ok(!cw().hasClass('cw-nohelp'), '第一次进显示');
+    await go('home');
+    await go('npc');
+    assert.ok(cw().hasClass('cw-nohelp'), '再进收起');
+    await click('[data-act="toggleHelp"]');
+    assert.ok(!cw().hasClass('cw-nohelp'), '点“说明”打开');
+    S.helpMode = 'always';
+    await go('world');
+    assert.ok(!cw().hasClass('cw-nohelp') && !cw().find('[data-act="toggleHelp"]').length);
+    S.helpMode = 'never';
+    await go('routes');
+    assert.ok(cw().hasClass('cw-nohelp'));
+    S.helpMode = 'first';
+    await go('home');
+    const tiles = cw().find('.cw-tile.cw-tool').map((_, el) => el.dataset.page).get();
+    assert.deepEqual(tiles, ['settings', 'prompts', 'about'], '提示词在关于前面');
+});
+
+await check('开场白页：有路线时也能写不分路线的开场白', async () => {
+    await go('greet');
+    assert.ok(cw().find('[data-act="showFreeGreet"]').length);
+    await click('[data-act="showFreeGreet"]');
+    assert.ok(cw().text().includes('不分路线'));
+    const n0 = draft().routes.length;
+    await click('[data-act="hooks"][data-i="-1"]');
+    assert.ok(draft().hooks[''].length);
+    assert.equal(draft().routes.length, n0, '没多出路线');
+    draft().hooks[''] = [];
+});
+
 await check('八股清理不碰基调与规则', async () => {
     await go('check');
     draft().tone = '<创作文体>\n调性: 嘴角勾起一抹若有若无的弧度也不行\n</创作文体>';
@@ -718,7 +780,11 @@ await check('改已有的卡：写回原卡（条目合并、新开场白加在�
     draft().personas[0].text = '他是扒手团的孤儿，十年后成了城主。';
     await go('import');
     assert.ok(cw().text().includes('写回原卡：黎曙'));
-    await click('[data-act="writeBack"]');
+    await click('[data-act="planWriteBack"]');
+    assert.ok(cw().find('.cw-planchk').length, '列出要写回的地方');
+    assert.ok(cw().text().includes('写卡工坊改了的') && cw().text().includes('新加的'));
+    assert.ok(cw().find('.cw-planchk[data-id="f:description"]').prop('checked'), '写卡工坊改的默认勾上');
+    await click('[data-act="applyWriteBack"]');
     const c = cards['黎曙.png'].data;
     assert.equal(c.description, '他是扒手团的孤儿，十年后成了城主。');
     assert.equal(c.first_mes, '原开场');
@@ -737,6 +803,24 @@ await check('改已有的卡：写回原卡（条目合并、新开场白加在�
     assert.deepEqual(cards['黎曙.png'].data.alternate_greetings, ['原开场2']);
     assert.equal(worlds['黎曙的书'].entries[0].content, '领头叫老鬼');
     assert.ok(!cards['黎曙.png'].data.character_book, '原来没有内嵌世界书，撤销后也没有');
+    // 在酒馆里改了开场白，再在写卡工坊改别的：写回时不会把酒馆里的开场白改回去
+    await click('[data-act="planWriteBack"]');
+    await click('[data-act="applyWriteBack"]');
+    cards['黎曙.png'].data.first_mes = '酒馆里改过的开场';
+    draft().personas[0].text = '他是扒手团的孤儿，十年后成了城主，还当了爹。';
+    await click('[data-act="planWriteBack"]');
+    const g0 = cw().find('.cw-planchk[data-id="g:0"]');
+    assert.ok(g0.length && !g0.prop('checked'), '酒馆里改过的开场白默认不勾');
+    assert.ok(cw().text().includes('只在酒馆里改过'));
+    // 只写人设，不写别的
+    cw().find('.cw-planchk').each(function () { if (this.dataset.id !== 'f:description' && this.checked) { this.checked = false; this.dispatchEvent(new window.Event('change', { bubbles: true })); } });
+    await tick();
+    await click('[data-act="applyWriteBack"]');
+    assert.equal(cards['黎曙.png'].data.first_mes, '酒馆里改过的开场', '酒馆里的开场白没被改回去');
+    assert.equal(cards['黎曙.png'].data.description, '他是扒手团的孤儿，十年后成了城主，还当了爹。');
+    assert.equal(draft().existing.greetings[0], '酒馆里改过的开场', '同步回写卡工坊');
+    await click('[data-act="planWriteBack"]');
+    assert.ok(!cw().find('.cw-planchk[data-id="g:0"]').length && !cw().find('.cw-planchk[data-id="f:description"]').length, '同步完，不再提示');
 });
 
 await check('AU：选卡 → 用这张卡做 AU → 提取内核 → 写设定 → 映射表 → 一键出卡（含一致性检查和修）→ 存成新卡，原卡不动', async () => {
@@ -796,6 +880,22 @@ await check('删除草稿：删一份历史、删当前、清空历史', async (
     await click('[data-act="clearDrafts"]');
     assert.equal(s.drafts.length, 0);
     assert.ok(cw().text().includes('没有历史草稿'));
+});
+
+await check('填了一半再一键出卡：自己写的人设一个字不动，也不会被换成新角色', async () => {
+    if (cw().find('.cw-tile').length === 0) await go('home');
+    await click('[data-act="newDraft"]');
+    const d = draft();
+    d.idea = '最后抱我一次吧';
+    const mine = '<守春人>\n我自己写的人设，他嘴角勾起一抹若有若无的弧度\n</守春人>';
+    d.personas = [{ name: '守春人', keys: [], overview: '', text: mine }];
+    await go('persona');
+    await go('home');
+    await click('[data-act="auto"]');
+    const names = draft().personas.map((p) => p.name);
+    assert.ok(names.includes('守春人'), names.join());
+    assert.equal(draft().personas.find((p) => p.name === '守春人').text, mine, '自己写的人设不被改写、不被八股清理');
+    assert.ok(prompts.some((p) => p.includes('【作者已经写好的内容】') && p.includes('我自己写的人设')), '构想时带上写好的人设');
 });
 
 fs.rmSync(tp, { recursive: true, force: true });
