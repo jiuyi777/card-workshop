@@ -1,0 +1,105 @@
+/* 提示词工坊 · 与写卡工坊协调的深色、紧凑界面 */
+body.pw-open { overflow: hidden; }
+#prompt-workshop-root { position: fixed; inset: 0; z-index: 100050; color: #e5e8f0; font-family: var(--mainFontFamily, system-ui, sans-serif); font-size: 14px; }
+#prompt-workshop-root * { box-sizing: border-box; }
+#prompt-workshop-root .pw-backdrop { position:absolute; inset:0; background:rgba(4,7,15,.78); backdrop-filter:blur(5px); }
+#prompt-workshop-root .pw-shell { position:absolute; inset:3vh max(3vw,12px); max-width:1320px; margin:auto; background:linear-gradient(155deg,#171d2b,#101622); border:1px solid #39445b; border-radius:18px; box-shadow:0 24px 100px #02040b; display:flex;flex-direction:column;overflow:hidden; }
+#prompt-workshop-root .pw-header { display:flex; align-items:center; gap:24px; padding:15px 22px; border-bottom:1px solid #313b52; background:rgba(255,255,255,.025); flex-shrink:0; }
+#prompt-workshop-root .pw-brand { display:flex; gap:11px; align-items:center; flex-shrink:0; }
+#prompt-workshop-root .pw-brand strong { display:block;font-size:18px;letter-spacing:.6px; }
+#prompt-workshop-root .pw-brand small { display:block;font-size:10px;letter-spacing:1.3px;color:#94a3b8; }
+#prompt-workshop-root .pw-logo { width:36px;height:36px;border-radius:11px;display:grid;place-items:center;background:#303e62;color:#b6c8ff;font-size:24px; }
+#prompt-workshop-root .pw-tabs { display:flex;gap:5px;align-self:stretch;align-items:center;flex:1; }
+#prompt-workshop-root .pw-tab { padding:9px 19px;border:0;border-radius:9px;background:transparent;color:#aebdd2;cursor:pointer; }
+#prompt-workshop-root .pw-tab.active { background:#2e3c5f;color:#eff5ff;font-weight:700; }
+#prompt-workshop-root .pw-tab:hover { background:#27334d; }
+#prompt-workshop-root .pw-close { border:0;background:transparent;font-size:20px;color:#b7c5d5;cursor:pointer;margin-left:auto;padding:5px; }
+#prompt-workshop-root .pw-main { padding:24px;overflow-y:auto;flex:1; min-height:0; }
+#prompt-workshop-root .pw-footer { display:flex;justify-content:space-between;padding:9px 24px;border-top:1px solid #283246;color:#76849a;font-size:11px;flex-shrink:0; }
+#prompt-workshop-root .pw-pagehead { display:flex; align-items:flex-start; justify-content:space-between; gap:15px;margin-bottom:20px; }
+#prompt-workshop-root .pw-eyebrow {color:#7f9fd8;font-size:11px;letter-spacing:2px;margin-bottom:7px;}
+#prompt-workshop-root h2 {font-size:24px;line-height:1.2;margin:0 0 8px;font-weight:700;color:#f3f6ff;}
+#prompt-workshop-root h3 {font-size:16px;margin:0 0 14px;color:#f3f6ff;}
+#prompt-workshop-root p {color:#a7b2c4;line-height:1.65;margin:0 0 12px;}
+#prompt-workshop-root .pw-card {border:1px solid #313c54;border-radius:13px;padding:18px;background:#1c2636;min-width:0;}
+#prompt-workshop-root .pw-grid {display:grid;gap:16px;}
+#prompt-workshop-root .pw-grid-wide {grid-template-columns:minmax(300px,.9fr) minmax(370px,1.1fr);}
+#prompt-workshop-root .pw-grid-two {grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
+#prompt-workshop-root .pw-field {display:flex;flex-direction:column;gap:7px;margin:0 0 15px;min-width:0;}
+#prompt-workshop-root .pw-field-label {font-weight:600;color:#d6dfed;font-size:12px;}
+#prompt-workshop-root .pw-field small,#prompt-workshop-root .pw-hint {color:#8595ac;font-size:12px;line-height:1.6;}
+#prompt-workshop-root .pw-hint {margin-top:12px;}
+#prompt-workshop-root .pw-input {border:1px solid #44506a;border-radius:8px; background:#121b2a; color:#e7eaf3;padding:10px 11px;font-size:13px;width:100%;min-width:0;outline:none; font-family:inherit; }
+#prompt-workshop-root .pw-input:focus {border-color:#8eaafb;box-shadow:0 0 0 2px #637ed22a;}
+#prompt-workshop-root textarea.pw-input {resize:vertical;line-height:1.6;}
+#prompt-workshop-root textarea.pw-large {min-height:188px;}
+#prompt-workshop-root textarea.pw-result {min-height:300px;height:42vh;max-height:560px;}
+#prompt-workshop-root .pw-row {display:flex;align-items:center;gap:8px;}
+#prompt-workshop-root .pw-wrap{flex-wrap:wrap;}
+#prompt-workshop-root .pw-inlineactions{flex-wrap:wrap;}
+#prompt-workshop-root .pw-justifyend{justify-content:flex-end;}
+#prompt-workshop-root .pw-grow{flex:1;}
+#prompt-workshop-root .pw-btn {display:inline-flex; align-items:center;justify-content:center;gap:5px;white-space:nowrap;border:1px solid #485875;background:#2b394f;color:#ecf3ff; padding:9px 13px;min-height:35px;border-radius:8px;cursor:pointer;font-size:12px;font-family:inherit;}
+#prompt-workshop-root .pw-btn:hover{background:#354a6c;border-color:#7087ac;}
+#prompt-workshop-root .pw-btn:disabled{opacity:.5;cursor:not-allowed;}
+#prompt-workshop-root .pw-btn.pw-primary{background:#6684d4;color:white;border-color:#7694e1;font-weight:650;}
+#prompt-workshop-root .pw-btn.pw-primary:hover{background:#7896eb;}
+#prompt-workshop-root .pw-btn.pw-danger-ghost{color:#e0a5b0;border-color:#714b5a;background:transparent;}
+#prompt-workshop-root .pw-btn.pw-compact {padding:5px 8px;min-height:28px;}
+#prompt-workshop-root .pw-status {color:#89b3e9;font-size:12px;}
+#prompt-workshop-root .pw-sectiontop {display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;}
+#prompt-workshop-root .pw-sectiontop h3{margin:0;}
+#prompt-workshop-root .pw-muted{color:#91a0b3;font-size:12px;}
+#prompt-workshop-root .pw-details {border-top:1px solid #344056;margin-top:15px;padding-top:12px;color:#a5b7d4;font-size:12px;}
+#prompt-workshop-root .pw-details summary{cursor:pointer;font-weight:600;}
+#prompt-workshop-root .pw-details p{padding-top:10px;font-size:12px;}
+#prompt-workshop-root .pw-librarybar {flex-wrap:wrap;}
+#prompt-workshop-root .pw-search{max-width:420px;flex:1;}
+#prompt-workshop-root #pw-tag-filter{max-width:160px;}
+#prompt-workshop-root .pw-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px;}
+#prompt-workshop-root .pw-entryhead{display:flex;justify-content:space-between;gap:10px;}
+#prompt-workshop-root .pw-entryhead strong {color:#f1f6ff;font-size:15px;}
+#prompt-workshop-root .pw-entryhead .pw-row{align-items:flex-start;flex-wrap:wrap;justify-content:flex-end;}
+#prompt-workshop-root .pw-meta{color:#8799b5;font-size:11px;margin-top:6px;}
+#prompt-workshop-root .pw-entrypreview{white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;line-height:1.65;color:#c1ccdb;margin:15px 0;font-size:12px;}
+#prompt-workshop-root .pw-tags{display:flex;flex-wrap:wrap;gap:5px;}
+#prompt-workshop-root .pw-tag{font-size:11px;background:#293956;border:1px solid #3f5070;color:#bbd2ff;border-radius:20px;padding:4px 9px;}
+#prompt-workshop-root .pw-badge{font-size:14px;color:#9eb7e8;}
+#prompt-workshop-root .pw-empty{border:1px dashed #44516b;padding:30px;text-align:center;border-radius:12px;color:#8da2c5;}
+#prompt-workshop-root .pw-assemblytop{flex-wrap:wrap;}
+#prompt-workshop-root .pw-assemblylist{display:grid;gap:9px;margin:14px 0;}
+#prompt-workshop-root .pw-sortrow{display:flex;align-items:center;gap:14px;padding:12px 16px;}
+#prompt-workshop-root .pw-sortrow.pw-selected{border-color:#6485c5;background:#253550;}
+#prompt-workshop-root .pw-sortrow.pw-dragging{opacity:.5;border-style:dashed;}
+#prompt-workshop-root .pw-grip{color:#7f96b9;font-size:22px;cursor:grab;user-select:none;}
+#prompt-workshop-root .pw-checkbox{height:17px;width:17px;flex-shrink:0;}
+#prompt-workshop-root .pw-rowbody{display:flex;flex:1;min-width:0;align-items:center;justify-content:space-between;gap:12px;}
+#prompt-workshop-root .pw-rowbody strong{font-size:14px;color:#f2f4ff;}
+#prompt-workshop-root .pw-sortcontrols{flex-wrap:wrap;justify-content:flex-end;}
+#prompt-workshop-root .pw-sortcontrols label{white-space:nowrap;color:#b6c6dd;font-size:12px;}
+#prompt-workshop-root .pw-export{margin-top:18px;}
+#prompt-workshop-root .pw-preview{padding:12px 15px;line-height:1.8;color:#c7d6ed;font-family:ui-monospace,monospace;font-size:12px;}
+#prompt-workshop-root .pw-rule{border:0;border-top:1px solid #3c4961;margin:22px 0;}
+#prompt-workshop-root code{color:#b1cfff;}
+.pw-fab{position:fixed;right:16px;bottom:100px;background:#263d66;border:1px solid #82a3f5;color:white;border-radius:12px;padding:10px 16px;cursor:pointer;z-index:5000;box-shadow:0 5px 20px #0008;}
+#pw-launch{cursor:pointer;}
+@media(max-width:930px){
+ #prompt-workshop-root .pw-header{flex-wrap:wrap;gap:10px;padding:12px;}
+ #prompt-workshop-root .pw-tabs{order:3;flex-basis:100%;justify-content:space-around;}
+ #prompt-workshop-root .pw-tab{flex:1;padding:8px 2px;}
+ #prompt-workshop-root .pw-main{padding:14px;}
+ #prompt-workshop-root .pw-grid-wide,#prompt-workshop-root .pw-list{grid-template-columns:1fr;}
+ #prompt-workshop-root .pw-shell{inset:0;border-radius:0;}
+ #prompt-workshop-root .pw-pagehead{flex-wrap:wrap;}
+ #prompt-workshop-root textarea.pw-result{height:260px;}
+}
+@media(max-width:530px){
+ #prompt-workshop-root .pw-grid-two{grid-template-columns:1fr;gap:0;}
+ #prompt-workshop-root .pw-card{padding:13px;}
+ #prompt-workshop-root .pw-entryhead,#prompt-workshop-root .pw-rowbody{flex-direction:column;align-items:flex-start;}
+ #prompt-workshop-root .pw-sortcontrols{justify-content:flex-start;}
+ #prompt-workshop-root .pw-footer{padding:8px 12px;}
+ #prompt-workshop-root .pw-footer span:last-child{display:none;}
+ #prompt-workshop-root .pw-brand strong{font-size:16px;}
+ #prompt-workshop-root .pw-pagehead h2{font-size:20px;}
+}

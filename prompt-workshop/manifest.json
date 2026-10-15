@@ -1,0 +1,11 @@
+{
+  "display_name": "提示词工坊",
+  "loading_order": 111,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "if love",
+  "version": "0.1.0"
+}
